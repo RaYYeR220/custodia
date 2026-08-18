@@ -1,0 +1,76 @@
+name: custodia
+
+services:
+  # HydraDB: object-store-native graph engine. Bolt on 7687, JSON API on 8443,
+  # health and metrics on 9090. The store lives in a named volume so a restart
+  # -- or a deliberate kill -- keeps the memory that was already committed.
+  hydradb:
+    image: ghcr.io/hydra-db/hydradb:latest
+    container_name: custodia-hydradb
+    ports:
+      - "7687:7687"
+      - "8443:8443"
+      - "9090:9090"
+    environment:
+      CLOUD_PROVIDER: local
+      LOCAL_PATH: /data/store
+      GRAPH_NAMESPACE: default
+      GRAPH_ID: default
+      GRAPH_CELL_ID: cell-0
+      GRAPH_CELLS: cell-0
+      GRAPH_NODE_ID: node-0
+      GRAPH_BOLT_NODE_ADDRESSES: node-0=127.0.0.1:7687
+      GRAPH_ADVERTISED_BOLT_ADDR: 127.0.0.1:7687
+      GRAPH_DATA_CACHE_DIR: /data/cache
+      GRAPH_AUTH_TOKEN_FILE: /data/auth-token
+      GRAPH_ALLOW_PLAINTEXT: "true"
+      RUST_MIN_STACK: "33554432"
+    volumes:
+      - hydra-store:/data/store
+      - hydra-cache:/data/cache
+      - ./docker/auth-token:/data/auth-token:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9090/metrics >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: custodia-api
+    ports:
+      - "8080:8080"
+    environment:
+      HYDRA_URI: neo4j://hydradb:7687
+      HYDRA_TOKEN: local-development-token-32-bytes
+      CUSTODIA_CORPUS: demo
+      CUSTODIA_CACHE_DIR: /app/data/cache
+      # no key configured -> the shipped response cache serves the demo
+      CUSTODIA_LLM_BASE_URL: ${CUSTODIA_LLM_BASE_URL:-https://openrouter.ai/api/v1}
+      CUSTODIA_LLM_API_KEY: ${CUSTODIA_LLM_API_KEY:-}
+      CUSTODIA_EXTRACT_MODEL: ${CUSTODIA_EXTRACT_MODEL:-google/gemini-2.5-flash}
+      CUSTODIA_ANSWER_MODEL: ${CUSTODIA_ANSWER_MODEL:-google/gemini-2.5-flash}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      hydradb:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: custodia-web
+    ports:
+      - "3000:3000"
+    environment:
+      CUSTODIA_API_URL: http://api:8080
+    depends_on:
+      - api
+
+volumes:
+  hydra-store:
+  hydra-cache:

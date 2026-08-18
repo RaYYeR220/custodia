@@ -1,0 +1,13 @@
+.git
+.venv
+node_modules
+web/node_modules
+web/.next
+data
+eval/data/raw
+eval/results
+.hydradb
+__pycache__
+**/__pycache__
+*.egg-info
+.pytest_cache
