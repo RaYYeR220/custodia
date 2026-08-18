@@ -26,7 +26,8 @@ dependencies = [
 dev = ["pytest>=8.2", "pytest-asyncio>=0.23"]
 
 [project.scripts]
-custodia = "custodia.cli:app"
+custodia = "custodia.cli:main"
+custodia-mcp = "custodia.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
