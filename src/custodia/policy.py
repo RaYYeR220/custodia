@@ -488,6 +488,14 @@ class Policy:
 
     # ----------------------------------------------------------------- helpers
 
+    def verdict(self, rule: str, reason: str) -> Decision:
+        """Build the decision a fired rule produces under the current strictness.
+
+        Exposed because the writer screens the *turn* a fact came from as well
+        as the fact itself, and both paths have to fail closed the same way.
+        """
+        return self._verdict(rule, reason)
+
     def rejection(
         self,
         decision: Decision,

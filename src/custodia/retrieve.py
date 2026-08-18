@@ -1,0 +1,804 @@
+"""Question to warrant: seeding, path expansion, temporal resolution, ranking.
+
+A *warrant* is the only thing the answering model is ever allowed to see. It is a
+bounded set of facts, each carrying the chain that reached it and the interval
+that justifies its position in time. Everything in this module exists to make
+that set both small and defensible.
+
+Three shapes are forced on us by HydraDB and are worth naming, because they look
+like odd choices otherwise:
+
+* **Multi-seed traversal goes through ``algo.MSpaths``.** A variable-length
+  ``MATCH`` needs a fixed source id inline, and ``WHERE`` has no ``IN``, so there
+  is no pattern that starts from a list of entities. The procedure is not a
+  workaround: it returns whole paths, so an evidence *chain* -- fact, the turn it
+  came from, the session that turn sat in -- arrives in one round trip instead of
+  being reassembled from endpoint rows.
+* **``MSpaths`` seeds on a property value, not on a corpus.** Two principals who
+  both know a `berlin` entity are seeded together, so every path is filtered
+  against the corpus client-side before anything is believed. Retrieval that
+  crossed a corpus boundary would be a memory leak between principals, which is
+  a worse failure than a slow query.
+* **Set membership is a per-id statement.** Fetching thirty facts by id is a
+  ``UNION`` of thirty single-id arms, batched, because there is no ``IN``.
+
+Retrieval never requires a language model. A model, when present, only widens the
+seed set; the deterministic noun-phrase heuristic underneath it is what the
+pipeline is actually built on, so a warrant is reproducible and an outage
+degrades recall rather than breaking retrieval.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Iterable, Protocol, Sequence, runtime_checkable
+
+from custodia import config, lexical, schema
+from custodia.hydra.client import HydraClient, HydraError
+from custodia.lexical import LexicalIndex
+from custodia.schema import Evidence, Tier
+
+log = logging.getLogger("custodia.retrieve")
+
+# --------------------------------------------------------------------------- #
+# tuning
+# --------------------------------------------------------------------------- #
+
+#: how many candidate terms are matched against `Entity.norm` in one UNION
+SEED_ARMS = 24
+#: how many single-id arms go into one batched read
+FETCH_ARMS = 32
+#: shortest candidate term allowed to seed a `STARTS WITH` match
+PREFIX_MIN = 4
+#: longest noun phrase the deterministic seeder will propose
+PHRASE_MAX = 3
+
+#: ranking weights; they sum to 1.0 so a score is directly comparable to
+#: `Settings.evidence_floor` and readable in the UI as a percentage
+W_SEED = 0.35
+W_PROXIMITY = 0.20
+W_TIER = 0.15
+W_CORROBORATION = 0.10
+W_RECENCY = 0.20
+
+#: corroboration saturates: the fourth independent witness adds nothing
+CORROBORATION_CAP = 3
+
+#: seed strength for a fact that directly mentions a seeded entity, and for one
+#: reached only by walking further out from it
+SEED_DIRECT = 1.0
+SEED_INDIRECT = 0.5
+
+#: facts below this tier never enter a warrant. External content is
+#: attacker-influenceable by definition; it may be recorded and it may be shown
+#: in an audit, but an answer may not be built on it.
+MIN_TIER = Tier.TOOL
+
+_FACT_FIELDS = (
+    "f.id AS id, f.corpus AS corpus, f.key AS key, f.text AS text, f.subj AS subj, "
+    "f.pred AS pred, f.obj AS obj, f.tier AS tier, f.rank AS rank, f.status AS status, "
+    "f.vfrom AS vfrom, f.vto AS vto, f.ing AS ing, f.conf AS conf, f.sid AS sid, "
+    "f.sidx AS sidx, f.tidx AS tidx"
+)
+
+_PROV_FIELDS = (
+    "f.id AS fid, t.text AS turn_text, t.ts AS turn_ts, t.role AS turn_role, t.sid AS turn_sid"
+)
+
+
+@runtime_checkable
+class LanguageModel(Protocol):
+    """The slice of :class:`custodia.llm.LLM` retrieval and the gate depend on.
+
+    Declared structurally so a test can pass a twenty-line stub, and so this
+    module never imports the provider client at module scope.
+    """
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str | None = ...,
+        temperature: float = ...,
+        max_tokens: int = ...,
+    ) -> Any: ...
+
+    def json(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str | None = ...,
+        temperature: float = ...,
+        max_tokens: int = ...,
+    ) -> dict[str, Any]: ...
+
+
+SEED_SYSTEM = """You pull retrieval keys out of a question about someone's stored memory.
+
+Return JSON only:
+{"entities": ["..."], "predicates": ["..."]}
+
+entities   - people, places, organisations, products, projects or topics the
+             question is about, lowercased, singular, no articles.
+predicates - the relation the question asks about, as one or two words
+             ("lives in", "works at", "prefers").
+
+Propose what a keyword index would need. Do not answer the question, do not
+invent entities the question does not name, and return no other keys."""
+
+
+# --------------------------------------------------------------------------- #
+# the warrant
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(slots=True)
+class Warrant:
+    """The bounded evidence set an answer is allowed to be built from."""
+
+    question: str
+    asked_at: int
+    as_of: int | None
+    evidence: list[Evidence] = field(default_factory=list)
+    seeds: dict[str, list[str]] = field(default_factory=dict)
+    paths_examined: int = 0
+    facts_considered: int = 0
+    elapsed_ms: float = 0.0
+    #: untrusted evidence that was retrieved and refused - surfaced in the UI,
+    #: because "we saw the attack and dropped it" is the demonstrable claim
+    quarantined_seen: int = 0
+
+    def ids(self) -> set[int]:
+        """The only fact ids a citation may name."""
+        return {e.fid for e in self.evidence}
+
+    def __len__(self) -> int:
+        return len(self.evidence)
+
+    def __bool__(self) -> bool:
+        return bool(self.evidence)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "question": self.question,
+            "asked_at": self.asked_at,
+            "as_of": self.as_of,
+            "seeds": dict(self.seeds),
+            "evidence": [asdict(e) for e in self.evidence],
+            "paths_examined": self.paths_examined,
+            "facts_considered": self.facts_considered,
+            "quarantined_seen": self.quarantined_seen,
+            "elapsed_ms": round(self.elapsed_ms, 2),
+        }
+
+
+@dataclass(slots=True)
+class _Candidate:
+    """A fact under consideration, with how it was reached."""
+
+    fid: int
+    props: dict[str, Any] = field(default_factory=dict)
+    hops: int = 0
+    path: list[str] = field(default_factory=list)
+    seed: float = 0.0
+    routes: set[str] = field(default_factory=set)
+
+    def reached(self, *, hops: int, path: list[str], seed: float, route: str) -> None:
+        """Merge a second route to the same fact, keeping the strongest of each."""
+        if not self.path or hops < self.hops:
+            self.hops = hops
+            self.path = path
+        self.seed = max(self.seed, seed)
+        self.routes.add(route)
+
+
+# --------------------------------------------------------------------------- #
+# the retriever
+# --------------------------------------------------------------------------- #
+
+
+class Retriever:
+    """Turns a question into a warrant against one corpus."""
+
+    def __init__(
+        self,
+        client: HydraClient,
+        corpus: str,
+        *,
+        index: LexicalIndex | None = None,
+        llm: LanguageModel | None = None,
+        settings: config.Settings | None = None,
+        min_tier: Tier = MIN_TIER,
+    ) -> None:
+        self.client = client
+        self.corpus = corpus
+        self.settings = settings or config.settings()
+        self.index = index
+        self.llm = llm
+        self.min_tier = Tier.parse(min_tier)
+
+    # ------------------------------------------------------------------ seeding
+
+    def seeds(self, question: str) -> dict[str, list[str]]:
+        """Entity keys and lexical terms the question resolves to.
+
+        The heuristic runs first and always; a model, if one is configured, only
+        prepends candidates to it. Order matters because the entity match is
+        capped, and a phrase the question actually contains is a better bet than
+        one a model inferred.
+        """
+        terms = self._phrases(question)
+        proposed = self._model_terms(question)
+        candidates = _dedupe([*proposed, *terms])
+        entities = self._match_entities(candidates)
+        return {"entities": entities, "terms": candidates[: self.settings.seed_lexical]}
+
+    def _phrases(self, question: str) -> list[str]:
+        """Contiguous runs of non-stopword tokens, longest first.
+
+        A crude noun-phrase reader, and deliberately so: `Entity.norm` is a
+        normalised surface form, so the thing that matches it is a normalised
+        surface form from the question, not a parse tree.
+        """
+        tokens = lexical.words(question)
+        runs: list[list[str]] = [[]]
+        for token in tokens:
+            if token in lexical.STOPWORDS or len(token) < 2:
+                if runs[-1]:
+                    runs.append([])
+                continue
+            runs[-1].append(token)
+
+        phrases: list[str] = []
+        singles: list[str] = []
+        for run in runs:
+            if not run:
+                continue
+            for size in range(min(PHRASE_MAX, len(run)), 1, -1):
+                for start in range(len(run) - size + 1):
+                    phrases.append(" ".join(run[start : start + size]))
+            singles.extend(run)
+        return _dedupe([*phrases, *singles])
+
+    def _model_terms(self, question: str) -> list[str]:
+        """Entity and predicate candidates from a model, if one is available.
+
+        Wrapped whole: a provider outage must cost recall, never the query. The
+        deterministic phrases below it are what retrieval actually stands on.
+        """
+        llm = self.llm
+        if llm is None or not getattr(llm, "enabled", False):
+            return []
+        try:
+            reply = llm.json(
+                [
+                    {"role": "system", "content": SEED_SYSTEM},
+                    {"role": "user", "content": question},
+                ],
+                model=self.settings.extract_model,
+                max_tokens=256,
+            )
+        except Exception as exc:  # provider error, bad JSON, cache miss
+            log.debug("seed model unavailable, falling back to phrases: %s", exc)
+            return []
+        out: list[str] = []
+        for key in ("entities", "predicates"):
+            for item in reply.get(key) or []:
+                text = str(item).strip().lower()
+                if text and len(text) < 64:
+                    out.append(text)
+        return out
+
+    def _match_entities(self, candidates: Sequence[str]) -> list[str]:
+        """Resolve candidate terms to `Entity.norm` values present in the corpus.
+
+        Equality and ``STARTS WITH`` are the only string predicates the engine
+        has, and there is no ``IN``, so this is a ``UNION`` with one arm per
+        candidate per predicate, batched to keep statements a sane size.
+        """
+        wanted = [c for c in candidates if c]
+        if not wanted:
+            return []
+
+        limit = max(1, self.settings.seed_entities)
+        exact: list[str] = []
+        prefix: list[str] = []
+        for chunk in _chunks(wanted, SEED_ARMS):
+            arms: list[str] = []
+            params: dict[str, Any] = {"corpus": self.corpus}
+            for i, term in enumerate(chunk):
+                params[f"v{i}"] = term
+                arms.append(
+                    f"MATCH (e:{schema.ENTITY}) WHERE e.corpus = $corpus AND e.norm = $v{i} "
+                    "RETURN e.norm AS norm, 1 AS exact"
+                )
+                if len(term) >= PREFIX_MIN:
+                    arms.append(
+                        f"MATCH (e:{schema.ENTITY}) WHERE e.corpus = $corpus "
+                        f"AND e.norm STARTS WITH $v{i} RETURN e.norm AS norm, 0 AS exact"
+                    )
+            for row in self.client.run(" UNION ".join(arms), **params):
+                norm = str(row.get("norm") or "")
+                if not norm:
+                    continue
+                (exact if int(row.get("exact") or 0) else prefix).append(norm)
+
+        return _dedupe([*exact, *prefix])[:limit]
+
+    # ---------------------------------------------------------------- expansion
+
+    def warrant(
+        self,
+        question: str,
+        *,
+        as_of: int | None = None,
+        k: int | None = None,
+    ) -> Warrant:
+        """Seed, expand, resolve in time, rank, and cut to a bounded set."""
+        started = time.perf_counter()
+        asked_at = int(time.time())
+        size = k if k is not None else self.settings.warrant_size
+
+        seeds = self.seeds(question)
+        candidates: dict[int, _Candidate] = {}
+        turns: dict[int, dict[str, Any]] = {}
+
+        paths_examined = self._expand(seeds["entities"], candidates, turns)
+        self._lexical(question, candidates)
+        self._hydrate(candidates)
+
+        facts_considered = len(candidates)
+        resolved, quarantined = self._resolve(candidates, as_of)
+        ranked = self._rank(resolved)
+
+        keep = [c for c in ranked if c.score >= self.settings.evidence_floor][:size]
+        self._attach_provenance(keep, turns)
+
+        return Warrant(
+            question=question,
+            asked_at=asked_at,
+            as_of=as_of,
+            evidence=keep,
+            seeds=seeds,
+            paths_examined=paths_examined,
+            facts_considered=facts_considered,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            quarantined_seen=quarantined,
+        )
+
+    def _expand(
+        self,
+        entities: Sequence[str],
+        candidates: dict[int, _Candidate],
+        turns: dict[int, dict[str, Any]],
+    ) -> int:
+        """Walk out from the entity seeds and absorb every fact on every path."""
+        if not entities:
+            return 0
+        try:
+            rows = self.client.paths(
+                rel_types=schema.RETRIEVAL_RELS,
+                source_label=schema.ENTITY,
+                source_property="norm",
+                source_values=list(entities),
+                max_len=self.settings.path_max_len,
+                direction="both",
+                count=self.settings.path_count,
+            )
+        except HydraError as exc:
+            log.warning("path expansion failed for %s: %s", self.corpus, exc)
+            return 0
+        for row in rows:
+            self._absorb(row.get("path"), candidates, turns)
+        return len(rows)
+
+    def _absorb(
+        self,
+        path: Any,
+        candidates: dict[int, _Candidate],
+        turns: dict[int, dict[str, Any]],
+    ) -> None:
+        """Parse one returned path into facts, hop distances and provenance.
+
+        `MSpaths` seeds on a property value across the whole graph, so a node
+        belonging to another corpus can and does appear here. Every node is
+        checked against the corpus before it is believed.
+        """
+        if path is None:
+            return
+        nodes = list(getattr(path, "nodes", ()) or ())
+        rels = list(getattr(path, "relationships", ()) or ())
+        if not nodes:
+            return
+
+        labels = [set(getattr(n, "labels", ()) or ()) for n in nodes]
+        props = [dict(n) for n in nodes]
+        if props[0].get("corpus") not in (None, self.corpus):
+            return
+
+        for i, node in enumerate(nodes):
+            if schema.FACT not in labels[i] or props[i].get("corpus") != self.corpus:
+                continue
+            fid = _vertex_id(node)
+            if fid is None:
+                continue
+            seed = SEED_DIRECT if i <= 1 else SEED_INDIRECT
+            entry = candidates.setdefault(fid, _Candidate(fid=fid))
+            entry.props = entry.props or props[i]
+            entry.reached(
+                hops=i,
+                path=_readable(labels[: i + 1], props[: i + 1], rels[:i]),
+                seed=seed,
+                route="entity",
+            )
+
+        # a DERIVED_FROM edge on the path already carries the turn, so the
+        # provenance snippet is free for any fact the traversal walked through
+        for rel in rels:
+            if getattr(rel, "type", "") != schema.DERIVED_FROM:
+                continue
+            src = _vertex_id(getattr(rel, "start_node", None))
+            dst = getattr(rel, "end_node", None)
+            if src is None or dst is None:
+                continue
+            turn = dict(dst)
+            if turn.get("corpus") == self.corpus:
+                turns.setdefault(src, turn)
+
+    def _lexical(self, question: str, candidates: dict[int, _Candidate]) -> None:
+        """Fold in the BM25 hits, which cover claims no entity extractor tagged."""
+        if self.index is None or not len(self.index):
+            return
+        for fid, score in self.index.search(question, self.settings.seed_lexical):
+            entry = candidates.setdefault(int(fid), _Candidate(fid=int(fid)))
+            entry.reached(hops=0, path=["lexical index"], seed=float(score), route="lexical")
+
+    def _hydrate(self, candidates: dict[int, _Candidate]) -> None:
+        """Fill in properties for candidates that arrived without them."""
+        missing = [fid for fid, c in candidates.items() if not c.props]
+        for fid, props in self._fetch_facts(missing).items():
+            candidates[fid].props = props
+        for fid in list(candidates):
+            props = candidates[fid].props
+            if not props or props.get("corpus") != self.corpus:
+                del candidates[fid]
+
+    def _fetch_facts(self, ids: Iterable[int]) -> dict[int, dict[str, Any]]:
+        """Read facts by id. No ``IN``, so this is a batched ``UNION`` of arms."""
+        wanted = _dedupe_ints(ids)
+        out: dict[int, dict[str, Any]] = {}
+        for chunk in _chunks(wanted, FETCH_ARMS):
+            arms = []
+            params: dict[str, Any] = {}
+            for i, fid in enumerate(chunk):
+                params[f"p{i}"] = int(fid)
+                arms.append(
+                    f"MATCH (f:{schema.FACT}) WHERE f.id = $p{i} RETURN {_FACT_FIELDS}"
+                )
+            for row in self.client.run(" UNION ".join(arms), **params):
+                if row.get("id") is not None:
+                    out[int(row["id"])] = dict(row)
+        return out
+
+    # --------------------------------------------------------------- resolution
+
+    def _resolve(
+        self,
+        candidates: dict[int, _Candidate],
+        as_of: int | None,
+    ) -> tuple[list[_Candidate], int]:
+        """Collapse supersession chains and drop what may not be warranted.
+
+        Two questions, one graph. Without ``as_of`` the head of each chain is the
+        answer; with it, the member whose ``[valid_from, valid_to)`` interval
+        contains the instant is. Neither overwrites the other, which is the whole
+        point of keeping validity apart from ingestion time.
+        """
+        newer, older = self._supersession()
+
+        # every member of every candidate's lineage may end up being the fact the
+        # question wants, so their properties are fetched once, up front, rather
+        # than one id-lookup per chain walk
+        lineages = {fid: _lineage(fid, newer, older) for fid in candidates}
+        props: dict[int, dict[str, Any]] = {
+            fid: dict(cand.props) for fid, cand in candidates.items() if cand.props
+        }
+        wanted = [m for members in lineages.values() for m in members if m not in props]
+        props.update(self._fetch_facts(wanted))
+
+        selected: dict[int, _Candidate] = {}
+        for fid, cand in candidates.items():
+            target = _select(lineages[fid], props, newer, as_of, fid)
+            if target is None:
+                continue
+            if target != fid:
+                cand = _Candidate(
+                    fid=target,
+                    props=dict(props.get(target) or cand.props),
+                    hops=cand.hops,
+                    path=[*cand.path, schema.SUPERSEDES, f"Fact:{target}"],
+                    seed=cand.seed,
+                    routes=set(cand.routes),
+                )
+            existing = selected.get(cand.fid)
+            if existing is None:
+                selected[cand.fid] = cand
+            else:
+                existing.reached(
+                    hops=cand.hops,
+                    path=cand.path,
+                    seed=cand.seed,
+                    route=next(iter(cand.routes), "entity"),
+                )
+
+        quarantined = 0
+        keep: list[_Candidate] = []
+        for cand in selected.values():
+            status = str(cand.props.get("status") or schema.ACTIVE)
+            rank = int(cand.props.get("rank") or 0)
+            if status == schema.QUARANTINED or rank < int(self.min_tier):
+                quarantined += 1
+                continue
+            if status not in schema.WARRANTABLE:
+                continue
+            cand.props["superseded_by"] = newer.get(cand.fid)
+            keep.append(cand)
+        return keep, quarantined
+
+    def _supersession(self) -> tuple[dict[int, int], dict[int, int]]:
+        """``{displaced: replacement}`` and its inverse, for this corpus."""
+        rows = self.client.run(
+            f"MATCH (a:{schema.FACT})-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) "
+            "WHERE a.corpus = $corpus RETURN a.id AS newer, b.id AS older",
+            corpus=self.corpus,
+        )
+        newer: dict[int, int] = {}
+        older: dict[int, int] = {}
+        for row in rows:
+            if row.get("newer") is None or row.get("older") is None:
+                continue
+            newer[int(row["older"])] = int(row["newer"])
+            older[int(row["newer"])] = int(row["older"])
+        return newer, older
+
+    # ------------------------------------------------------------------ ranking
+
+    def _rank(self, candidates: Sequence[_Candidate]) -> list[Evidence]:
+        """Blend seed strength, proximity, tier, corroboration and recency."""
+        if not candidates:
+            return []
+
+        corroboration = self._corroboration()
+        stamps = sorted({int(c.props.get("vfrom") or 0) for c in candidates})
+        spread = max(1, len(stamps) - 1)
+        recency_of = {stamp: i / spread for i, stamp in enumerate(stamps)}
+
+        out: list[Evidence] = []
+        for cand in candidates:
+            props = cand.props
+            proximity = 1.0 / (1.0 + max(0, cand.hops))
+            tier = int(props.get("rank") or 0) / int(Tier.OWNER)
+            corr = min(corroboration.get(cand.fid, 0), CORROBORATION_CAP) / CORROBORATION_CAP
+            recency = recency_of.get(int(props.get("vfrom") or 0), 0.0)
+            score = (
+                W_SEED * min(1.0, cand.seed)
+                + W_PROXIMITY * proximity
+                + W_TIER * tier
+                + W_CORROBORATION * corr
+                + W_RECENCY * recency
+            )
+            out.append(
+                Evidence(
+                    fid=cand.fid,
+                    text=str(props.get("text") or ""),
+                    tier=str(props.get("tier") or Tier.EXTERNAL.label),
+                    status=str(props.get("status") or schema.ACTIVE),
+                    valid_from=int(props.get("vfrom") or 0),
+                    valid_to=int(props.get("vto") or schema.OPEN_INTERVAL),
+                    sid=str(props.get("sid") or ""),
+                    sidx=int(props.get("sidx") or 0),
+                    tidx=int(props.get("tidx") or 0),
+                    score=round(score, 6),
+                    hops=int(cand.hops),
+                    path=list(cand.path),
+                    superseded_by=props.get("superseded_by"),
+                )
+            )
+        out.sort(key=lambda e: (-e.score, e.hops, -e.valid_from, e.fid))
+        return out
+
+    def _corroboration(self) -> dict[int, int]:
+        """How many independent facts back each fact, counting both directions.
+
+        One read for the whole corpus: `CORROBORATES` is sparse, and thirty
+        single-id arms would cost more than the edge list does.
+        """
+        counts: dict[int, int] = {}
+        rows = self.client.run(
+            f"MATCH (a:{schema.FACT})-[:{schema.CORROBORATES}]->(b:{schema.FACT}) "
+            "WHERE a.corpus = $corpus RETURN a.id AS src, b.id AS dst",
+            corpus=self.corpus,
+        )
+        for row in rows:
+            for key in ("src", "dst"):
+                value = row.get(key)
+                if value is not None:
+                    counts[int(value)] = counts.get(int(value), 0) + 1
+        return counts
+
+    # -------------------------------------------------------------- provenance
+
+    def _attach_provenance(
+        self,
+        evidence: Sequence[Evidence],
+        turns: dict[int, dict[str, Any]],
+    ) -> None:
+        """Give every surviving fact the turn text and timestamp it came from."""
+        for item in evidence:
+            turn = turns.get(item.fid)
+            if turn:
+                item.turn_text = str(turn.get("text") or "")
+                item.turn_ts = int(turn.get("ts") or 0)
+
+        missing = [e.fid for e in evidence if not e.turn_text]
+        if not missing:
+            return
+        found: dict[int, dict[str, Any]] = {}
+        for chunk in _chunks(missing, FETCH_ARMS):
+            arms = []
+            params: dict[str, Any] = {}
+            for i, fid in enumerate(chunk):
+                params[f"p{i}"] = int(fid)
+                arms.append(
+                    f"MATCH (f:{schema.FACT})-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) "
+                    f"WHERE f.id = $p{i} RETURN {_PROV_FIELDS}"
+                )
+            for row in self.client.run(" UNION ".join(arms), **params):
+                if row.get("fid") is not None:
+                    found.setdefault(int(row["fid"]), dict(row))
+        for item in evidence:
+            row = found.get(item.fid)
+            if row:
+                item.turn_text = str(row.get("turn_text") or "")
+                item.turn_ts = int(row.get("turn_ts") or 0)
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+
+
+def _lineage(fid: int, newer: dict[int, int], older: dict[int, int]) -> list[int]:
+    """Every fact connected to this one by a chain of SUPERSEDES edges."""
+    seen = [fid]
+    cursor = fid
+    while cursor in newer and newer[cursor] not in seen:
+        cursor = newer[cursor]
+        seen.append(cursor)
+    cursor = fid
+    while cursor in older and older[cursor] not in seen:
+        cursor = older[cursor]
+        seen.append(cursor)
+    return seen
+
+
+def _select(
+    lineage: Sequence[int],
+    props: dict[int, dict[str, Any]],
+    newer: dict[int, int],
+    as_of: int | None,
+    fid: int,
+) -> int | None:
+    """Which member of a supersession chain the question is asking for.
+
+    With no ``as_of`` that is the head -- the one nothing supersedes. With an
+    ``as_of`` it is the member whose ``[valid_from, valid_to)`` interval covers
+    the instant, `valid_to == 0` meaning still open. A question about a moment
+    before anything in the chain was true has no answer in it, and says so by
+    returning None rather than by falling back to the head.
+    """
+    if as_of is None:
+        head = fid
+        seen = {fid}
+        while head in newer and newer[head] not in seen:
+            head = newer[head]
+            seen.add(head)
+        return head
+
+    best: tuple[int, int] | None = None
+    for member in lineage:
+        member_props = props.get(member)
+        if not member_props:
+            continue
+        vfrom = int(member_props.get("vfrom") or 0)
+        vto = int(member_props.get("vto") or schema.OPEN_INTERVAL)
+        if vfrom > as_of:
+            continue
+        if vto != schema.OPEN_INTERVAL and as_of >= vto:
+            continue
+        if best is None or vfrom > best[1]:
+            best = (member, vfrom)
+    return best[0] if best else None
+
+
+def _vertex_id(node: Any) -> int | None:
+    """HydraDB's vertex id, taken off the driver's element id.
+
+    Path node property maps do not carry `id`, so the element id is the only
+    place the identity is available on a traversal result.
+    """
+    if node is None:
+        return None
+    raw = getattr(node, "element_id", None)
+    if raw is None:
+        return None
+    text = str(raw)
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1]
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _readable(
+    labels: Sequence[set[str]],
+    props: Sequence[dict[str, Any]],
+    rels: Sequence[Any],
+) -> list[str]:
+    """A hop-by-hop rendering of the chain that reached a fact."""
+    out: list[str] = []
+    for i, prop in enumerate(props):
+        out.append(_node_label(labels[i], prop))
+        if i < len(rels):
+            out.append(getattr(rels[i], "type", "?"))
+    return out
+
+
+def _node_label(labels: set[str], props: dict[str, Any]) -> str:
+    label = next(iter(sorted(labels)), "Node")
+    if schema.ENTITY in labels:
+        return f"Entity:{props.get('norm') or props.get('name') or '?'}"
+    if schema.FACT in labels:
+        return f"Fact:{_clip(props.get('key') or props.get('text') or '?')}"
+    if schema.TURN in labels:
+        return f"Turn:{props.get('sid') or '?'}#{props.get('idx', '?')}"
+    if schema.SESSION in labels:
+        return f"Session:{props.get('sid') or '?'}"
+    return label
+
+
+def _clip(value: Any, limit: int = 48) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _dedupe(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _dedupe_ints(values: Iterable[int]) -> list[int]:
+    seen: set[int] = set()
+    out: list[int] = []
+    for value in values:
+        number = int(value)
+        if number not in seen:
+            seen.add(number)
+            out.append(number)
+    return out
+
+
+def _chunks(values: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
+    for i in range(0, len(values), size):
+        yield values[i : i + size]

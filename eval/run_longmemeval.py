@@ -1,0 +1,487 @@
+"""Runner: LongMemEval (and siblings) across Custodia and the two baselines.
+
+    python -m eval.run_longmemeval --limit 50 --systems custodia,fullcontext,rag
+
+A full run is long -- LongMemEval-S is ~50 sessions and ~122k estimated tokens per
+question -- so the runner is built to be interrupted. Every ``(question, system)``
+result is appended to a JSONL sidecar the moment it is produced; ``--resume`` reads
+that file and skips what is already there. The scorecard is always recomputed from
+the sidecar, never accumulated in memory, so a resumed run and an uninterrupted
+one produce the same numbers.
+
+Custodia is imported inside the functions that use it. The harness therefore still
+runs the baselines when the memory layer is unavailable, and says so in the
+result file's ``skipped`` block rather than quietly reporting a two-system
+comparison as a three-system one.
+
+The contract this runner expects from ``src/custodia`` is documented on
+:class:`CustodiaSystem`.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import traceback
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
+
+import typer
+
+from . import LlmBinding, NoProviderConfigured, estimate_tokens, resolve_llm
+from .baselines import BaselineAnswer, FullContextBaseline, VectorlessRagBaseline
+from .datasets import (
+    DatasetUnavailable,
+    Instance,
+    SOURCES,
+    dataset_stats,
+    load_dataset,
+    manifest,
+)
+from .scorers import (
+    RunRecord,
+    fallback_judge,
+    judge,
+    looks_like_abstention,
+    score_systems,
+)
+
+app = typer.Typer(add_completion=False, help=__doc__)
+
+DEFAULT_SYSTEMS = "custodia,fullcontext,rag"
+
+
+class MissingIntegration(RuntimeError):
+    """A Custodia module or entry point the runner needs is not present yet."""
+
+
+def _first(module: Any, names: Sequence[str]) -> Any | None:
+    for name in names:
+        attribute = getattr(module, name, None)
+        if attribute is not None:
+            return attribute
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# the system under test
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(slots=True)
+class CustodiaSystem:
+    """Adapter onto Custodia: ingest one instance, then ask its question.
+
+    The expected contract, in the order it is tried:
+
+    ingest
+        ``custodia.ingest.Ingestor(client, corpus=...)`` exposing
+        ``add_turn(sid=, sidx=, idx=, role=, text=, ts=, tier=, origin=)`` and
+        ``flush()``; or a module-level
+        ``ingest_sessions(client, corpus, sessions)`` /
+        ``ingest_turns(client, corpus, turns)``.
+
+    answer
+        ``custodia.gate.Gate(client, corpus=...)`` exposing
+        ``answer(question, asked_at=...)`` whose result carries ``text`` (or
+        ``answer``), ``abstained`` and ``citations``; or a module-level
+        ``answer(client, corpus, question, asked_at=...)``.
+
+    Anything missing raises :class:`MissingIntegration` naming what was looked
+    for. The runner records that as a skipped system; it never substitutes an
+    answer.
+    """
+
+    name: str = "custodia"
+    corpus_prefix: str = "eval-"
+    client: Any = None
+    _ingestor: Any = None
+
+    def connect(self) -> Any:
+        if self.client is None:
+            from custodia.config import settings
+            from custodia.hydra.client import HydraClient
+
+            config = settings()
+            self.client = HydraClient(config.hydra_uri, config.hydra_token)
+            if not self.client.ping(retries=5, delay=1.0):
+                raise MissingIntegration(
+                    f"HydraDB is not answering at {config.hydra_uri}; "
+                    "start it before running the custodia system"
+                )
+        return self.client
+
+    def corpus_for(self, instance: Instance) -> str:
+        """One corpus per question, so haystacks cannot leak into each other."""
+        return f"{self.corpus_prefix}{instance.qid}"
+
+    def ingest(self, instance: Instance) -> dict[str, Any]:
+        client = self.connect()
+        corpus = self.corpus_for(instance)
+        try:
+            from custodia import ingest as ingest_module
+        except ImportError as exc:
+            raise MissingIntegration(f"custodia.ingest is not importable: {exc}") from exc
+
+        started = time.perf_counter()
+        factory = _first(ingest_module, ("Ingestor", "Ingest", "CorpusWriter"))
+        if factory is not None:
+            writer = factory(client, corpus=corpus)
+            for sidx, session in enumerate(instance.sessions):
+                for idx, turn in enumerate(session.turns):
+                    writer.add_turn(
+                        sid=session.sid,
+                        sidx=sidx,
+                        idx=idx,
+                        role=turn.role,
+                        text=turn.content,
+                        ts=session.ts + idx,
+                        tier=_tier_for(turn.role),
+                        origin="",
+                    )
+            stats = writer.flush()
+        else:
+            fn = _first(ingest_module, ("ingest_sessions", "ingest_instance", "ingest_turns"))
+            if fn is None:
+                raise MissingIntegration(
+                    "custodia.ingest exposes none of: Ingestor / Ingest / CorpusWriter / "
+                    "ingest_sessions / ingest_instance / ingest_turns"
+                )
+            stats = fn(client, corpus, instance.sessions)
+        elapsed = (time.perf_counter() - started) * 1000
+        return {
+            "corpus": corpus,
+            "ingest_ms": round(elapsed, 1),
+            "ingest_stats": stats if isinstance(stats, dict) else str(stats),
+        }
+
+    def answer(self, instance: Instance) -> BaselineAnswer:
+        client = self.connect()
+        corpus = self.corpus_for(instance)
+        try:
+            from custodia import gate as gate_module
+        except ImportError as exc:
+            raise MissingIntegration(f"custodia.gate is not importable: {exc}") from exc
+
+        started = time.perf_counter()
+        gate_class = _first(gate_module, ("Gate", "AnswerGate"))
+        if gate_class is not None:
+            gate = gate_class(client, corpus=corpus)
+            result = gate.answer(instance.question, asked_at=instance.asked_at)
+        else:
+            fn = _first(gate_module, ("answer", "ask"))
+            if fn is None:
+                raise MissingIntegration(
+                    "custodia.gate exposes none of: Gate / AnswerGate / answer / ask"
+                )
+            result = fn(client, corpus, instance.question, asked_at=instance.asked_at)
+        elapsed = (time.perf_counter() - started) * 1000
+
+        text = _text_of(result)
+        abstained = getattr(result, "abstained", None)
+        if abstained is None and isinstance(result, dict):
+            abstained = result.get("abstained")
+        citations = getattr(result, "citations", None)
+        if citations is None and isinstance(result, dict):
+            citations = result.get("citations")
+        prompt_tokens = getattr(result, "prompt_tokens", 0) or 0
+        if not prompt_tokens:
+            warrant = getattr(result, "warrant", None)
+            prompt_tokens = estimate_tokens(str(warrant)) if warrant else estimate_tokens(text)
+
+        return BaselineAnswer(
+            text=text.strip(),
+            prompt_tokens=int(prompt_tokens),
+            latency_ms=round(elapsed, 1),
+            truncated=False,
+            notes={
+                "abstained_flag": bool(abstained) if abstained is not None else None,
+                "citations": len(citations) if citations is not None else None,
+                "corpus": corpus,
+            },
+        )
+
+    def provenance(self) -> dict[str, Any]:
+        return {"system": self.name, "corpus_prefix": self.corpus_prefix}
+
+
+def _tier_for(role: str) -> str:
+    """Map a benchmark role to a Custodia trust tier by name.
+
+    LongMemEval histories are entirely principal/assistant, so everything lands
+    at ``owner`` or ``assistant``; the poison suite is where the lower tiers get
+    exercised.
+    """
+    lowered = (role or "").strip().lower()
+    if lowered in {"user", "human", "owner"}:
+        return "owner"
+    if lowered in {"assistant", "ai", "agent", "bot"}:
+        return "assistant"
+    if lowered in {"tool", "function", "observation"}:
+        return "tool"
+    return "external"
+
+
+def _text_of(result: Any) -> str:
+    if isinstance(result, str):
+        return result
+    for attr in ("text", "answer", "content"):
+        value = getattr(result, attr, None)
+        if isinstance(value, str):
+            return value
+    if isinstance(result, dict):
+        for key in ("text", "answer", "content"):
+            if isinstance(result.get(key), str):
+                return str(result[key])
+    return str(result)
+
+
+# --------------------------------------------------------------------------- #
+# record store (resume)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(slots=True)
+class RecordStore:
+    """Append-only JSONL of per-question records; the unit of resumability."""
+
+    path: Path
+    done: set[tuple[str, str]] = field(default_factory=set)
+    rows: list[dict[str, Any]] = field(default_factory=list)
+
+    def load(self) -> None:
+        if not self.path.exists():
+            return
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a torn last line from a hard kill; drop it and move on
+            self.rows.append(row)
+            self.done.add((str(row.get("qid")), str(row.get("system"))))
+
+    def append(self, record: RunRecord) -> None:
+        payload = record.as_dict()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self.rows.append(payload)
+        self.done.add((record.qid, record.system))
+
+    def has(self, qid: str, system: str) -> bool:
+        return (qid, system) in self.done
+
+
+# --------------------------------------------------------------------------- #
+# grading
+# --------------------------------------------------------------------------- #
+
+
+def _grade(
+    instance: Instance,
+    prediction: str,
+    *,
+    judge_llm: LlmBinding | None,
+) -> tuple[bool, str, str]:
+    qtype = "abstention" if instance.is_abstention else instance.qtype
+    if judge_llm is not None:
+        verdict = judge(instance.question, instance.answer, prediction, qtype, llm=judge_llm)
+        if verdict.method != "llm-judge-failed":
+            return verdict.correct, verdict.method, verdict.reason
+        # a failed judge call is recorded as such, not retried into the fallback
+        return verdict.correct, verdict.method, verdict.reason
+    verdict = fallback_judge(instance.question, instance.answer, prediction, qtype)
+    return verdict.correct, verdict.method, verdict.reason
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def run(
+    limit: int = typer.Option(0, "--limit", help="questions to sample; 0 = the whole dataset"),
+    variant: str = typer.Option("s", "--variant", help=f"one of: {', '.join(sorted(SOURCES))}"),
+    systems: str = typer.Option(DEFAULT_SYSTEMS, "--systems", help="comma-separated"),
+    seed: int = typer.Option(0, "--seed", help="sampling seed; the sample is deterministic"),
+    out: str = typer.Option("eval/results/longmemeval.json", "--out"),
+    resume: bool = typer.Option(False, "--resume", help="skip questions already in the sidecar"),
+    types: str = typer.Option("", "--types", help="comma-separated question types to keep"),
+    judge_mode: str = typer.Option(
+        "auto", "--judge", help="llm | fallback | auto (llm when a provider is configured)"
+    ),
+    context_tokens: int = typer.Option(
+        128_000, "--context-tokens", help="input budget assumed for the full-context baseline"
+    ),
+    top_k: int = typer.Option(12, "--top-k", help="chunks the RAG baseline retrieves"),
+    corpus_prefix: str = typer.Option("eval-", "--corpus-prefix"),
+    allow_large: bool = typer.Option(False, "--allow-large", help="permit >1 GB downloads"),
+) -> None:
+    """Ingest, ask, score and write a resumable result file."""
+    started_at = datetime.now(timezone.utc)
+    out_path = Path(out)
+    store = RecordStore(out_path.with_suffix(".records.jsonl"))
+    if resume:
+        store.load()
+        typer.echo(f"resuming: {len(store.done)} records already present")
+
+    wanted = [s.strip() for s in systems.split(",") if s.strip()]
+    type_filter = [t.strip() for t in types.split(",") if t.strip()] or None
+    skipped: dict[str, str] = {}
+
+    # ---- dataset -----------------------------------------------------------
+    try:
+        instances = load_dataset(
+            variant,
+            limit=limit or None,
+            seed=seed,
+            stratify=True,
+            types=type_filter,
+            allow_large=allow_large,
+        )
+    except DatasetUnavailable as exc:
+        typer.secho(f"dataset unavailable: {exc}", fg=typer.colors.RED)
+        raise typer.Exit(code=2) from exc
+    stats = dataset_stats(instances)
+    typer.echo(
+        f"loaded {stats['instances']} instances "
+        f"({stats['abstention']['items']} abstention), "
+        f"~{stats['tokens_estimated']['per_instance_mean']:,.0f} estimated tokens each"
+    )
+
+    # ---- model -------------------------------------------------------------
+    llm: LlmBinding | None
+    try:
+        llm = resolve_llm()
+    except NoProviderConfigured as exc:
+        llm = None
+        typer.secho(f"no provider configured: {exc}", fg=typer.colors.YELLOW)
+
+    use_llm_judge = judge_mode == "llm" or (judge_mode == "auto" and llm is not None)
+    if judge_mode == "llm" and llm is None:
+        typer.secho("--judge llm requested but no provider is configured", fg=typer.colors.RED)
+        raise typer.Exit(code=2)
+    judge_llm = llm if use_llm_judge else None
+    if judge_llm is None:
+        skipped["judge"] = (
+            "graded by the non-LLM lexical fallback, which is materially weaker than "
+            "the rubric judge and under-reports paraphrased answers"
+        )
+
+    # ---- systems -----------------------------------------------------------
+    runners: dict[str, Any] = {}
+    provenance_systems: dict[str, Any] = {}
+    for name in wanted:
+        if name == "custodia":
+            runners[name] = CustodiaSystem(corpus_prefix=corpus_prefix)
+            provenance_systems[name] = runners[name].provenance()
+        elif name in {"fullcontext", "full", "longcontext"}:
+            if llm is None:
+                skipped[name] = "no language model provider configured"
+                continue
+            baseline = FullContextBaseline(llm, context_tokens=context_tokens)
+            runners["fullcontext"] = baseline
+            provenance_systems["fullcontext"] = baseline.provenance()
+        elif name in {"rag", "bm25"}:
+            if llm is None:
+                skipped[name] = "no language model provider configured"
+                continue
+            baseline = VectorlessRagBaseline(llm, top_k=top_k)
+            runners["rag"] = baseline
+            provenance_systems["rag"] = baseline.provenance()
+        else:
+            skipped[name] = "unknown system"
+    if not runners:
+        typer.secho("no runnable systems; nothing to measure", fg=typer.colors.RED)
+
+    # ---- the loop ----------------------------------------------------------
+    for position, instance in enumerate(instances, start=1):
+        for name, system in list(runners.items()):
+            if resume and store.has(instance.qid, name):
+                continue
+            record = RunRecord(
+                qid=instance.qid,
+                system=name,
+                qtype=instance.qtype,
+                is_abstention=instance.is_abstention,
+                question=instance.question,
+                gold=instance.answer,
+            )
+            try:
+                if isinstance(system, CustodiaSystem):
+                    record.extra.update(system.ingest(instance))
+                reply: BaselineAnswer = system.answer(instance)
+                record.prediction = reply.text
+                record.prompt_tokens = reply.prompt_tokens
+                record.latency_ms = reply.latency_ms
+                record.truncated = reply.truncated
+                record.extra.update(reply.notes)
+                flag = reply.notes.get("abstained_flag")
+                record.abstained = (
+                    bool(flag) if flag is not None else looks_like_abstention(reply.text)
+                )
+                correct, method, reason = _grade(instance, reply.text, judge_llm=judge_llm)
+                record.correct = correct
+                record.judge_method = method
+                record.judge_reason = reason
+            except MissingIntegration as exc:
+                skipped.setdefault(name, str(exc))
+                runners.pop(name, None)
+                typer.secho(f"{name}: {exc}", fg=typer.colors.YELLOW)
+                continue
+            except Exception as exc:  # measured as a failure, never as a score
+                record.error = f"{type(exc).__name__}: {exc}"
+                record.judge_method = "not-graded"
+                typer.secho(f"  {instance.qid} [{name}] {record.error}", fg=typer.colors.RED)
+                if "--traceback" in str(exc):  # pragma: no cover
+                    traceback.print_exc()
+            store.append(record)
+        typer.echo(f"[{position}/{len(instances)}] {instance.qid}")
+
+    # ---- score + write -----------------------------------------------------
+    cards = score_systems(store.rows)
+    source = SOURCES.get(variant if variant in SOURCES else "s")
+    recorded = (manifest().get("artifacts") or {}).get(source.key, {}) if source else {}
+    document = {
+        "provenance": {
+            "kind": "longmemeval",
+            "run": out_path.stem,
+            "started_at": started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "finished_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "dataset": recorded.get("key", variant),
+            "dataset_variant": variant,
+            "dataset_sha256": recorded.get("sha256", ""),
+            "dataset_source_url": recorded.get("url", source.url if source else ""),
+            "dataset_items_available": recorded.get("items", ""),
+            "sample_size": len(instances),
+            "seed": seed,
+            "stratified": True,
+            "types": type_filter or "all",
+            "systems": sorted(runners),
+            "answer_model": llm.model if llm else "",
+            "judge_model": judge_llm.model if judge_llm else "",
+            "llm_binding": llm.origin if llm else "none",
+            "judge_mode": "llm-judge" if judge_llm else "lexical-fallback (weaker)",
+            "system_settings": provenance_systems,
+        },
+        "dataset_stats": stats,
+        "scorecards": {name: card.as_json() for name, card in cards.items()},
+        "skipped": skipped,
+        "records_file": str(store.path),
+    }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    from .report import build_report
+
+    typer.echo(build_report(document))
+    typer.echo(f"\nwrote {out_path} and {store.path}")
+
+
+if __name__ == "__main__":
+    app()

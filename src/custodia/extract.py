@@ -61,8 +61,14 @@ class ExtractedFact:
     extractor: str = "llm"
 
     @property
-    def key(self) -> str:
-        """Canonical dedupe key, in the form ``schema.Fact.key`` expects."""
+    def triple(self) -> str:
+        """Within-session dedupe key.
+
+        Deliberately not called ``key``: the key a fact is *stored* under is
+        ``resolve.canonical_key``, which folds diacritics and articles that this
+        stage has no business deciding about. Extraction only needs to know when
+        it has said the same thing twice in one session.
+        """
         triple = f"{self.subject}|{self.predicate}|{self.object}"
         return triple if triple.strip("|") else f"|text|{_norm(self.text)}"
 
@@ -254,19 +260,35 @@ def _entities(raw: Any, subject: str) -> list[str]:
 _PREF_VERBS = "like|love|prefer|hate|enjoy|use|need|own|have|avoid|drink|play|drive|read|watch"
 _MOVE_VERBS = "live|work|study|train|volunteer|stay"
 _MOVE_PREPS = "in|at|for|on|with"
+_DID_VERBS = "signed up for|picked up|moved to|switched to|joined|started"
 _HEDGES = r"(?:really\s+|usually\s+|always\s+|currently\s+|still\s+|now\s+|only\s+)?"
 
 _PAT_MY = re.compile(r"^my\s+([a-z][a-z '\-]{0,28}?)\s+is\s+(.+)$", re.I)
 _PAT_MOVE = re.compile(rf"^i\s+{_HEDGES}({_MOVE_VERBS})\s+({_MOVE_PREPS})\s+(.+)$", re.I)
+_PAT_DID = re.compile(rf"^i(?:['’]ve|\s+have)?\s+({_DID_VERBS})\s+(.+)$", re.I)
 _PAT_AT = re.compile(r"^i(?:'m|\s+am)\s+(in|at|from)\s+(.+)$", re.I)
 _PAT_ING = re.compile(r"^i(?:'m|\s+am)\s+(\w+ing)\s+(.+)$", re.I)
 _PAT_PREF = re.compile(rf"^i\s+{_HEDGES}({_PREF_VERBS})\s+(.+)$", re.I)
 _PAT_IS = re.compile(r"^i(?:'m|\s+am)\s+(.+)$", re.I)
 
 _LEAD = re.compile(r"^(?:and|but|so|also|plus|then|ok|okay|yes|no|well|oh)[,\s]+", re.I)
-_CLAUSE = re.compile(r"\s+[-–—]\s+|;\s+|,\s+(?=(?:i|it|he|she|they|we|you|which|so)\b)", re.I)
+_CLAUSE = re.compile(
+    r"\s+[-–—]\s+|;\s+"
+    r"|,\s+(?=(?:i|it|he|she|they|we|you|which|so|and|but|then|not|the|a|an)\b)",
+    re.I,
+)
+_TRAIL = re.compile(r"\s+(?:now|today|as well|too|any\s?more|these days|from now on)$", re.I)
 _CAP = re.compile(r"\b([A-Z][\w&.'’-]*(?:\s+[A-Z][\w&.'’-]*)*)")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
+_ANCHOR = re.compile(r"\b(?:i|my)\b", re.I)
+#: words in front of the pronoun that make the claim hypothetical or reported
+_SUBORD = re.compile(
+    r"\b(?:when|if|whether|unless|because|that|ask|asks|asked|tell|tells|told"
+    r"|think|thinks|wonder|maybe|might|would|could|should)\b",
+    re.I,
+)
+#: how far in front of the pronoun an adverbial phrase may run
+LEAD_WINDOW = 40
 _IRREGULAR = {"have": "has", "do": "does", "go": "goes", "be": "is"}
 _PRONOUN_SUBJECTS = {"user", "i", "me", "my", "we"}
 _STOPCAPS = {"i", "my", "the", "a", "an", "and", "but", "so", "also", "ok", "okay", "yes", "no"}
@@ -276,7 +298,20 @@ def _rule_fact(sentence: str, turn: Turn, principal: str) -> ExtractedFact | Non
     line = _LEAD.sub("", sentence.strip()).strip()
     if not line or line.endswith("?"):
         return None
+    fact = _match(line, turn, principal)
+    if fact is not None:
+        return fact
+    # a claim often trails a short adverbial - "As of the first of April I'm
+    # design lead" - so retry from the pronoun, but only when the words in front
+    # of it are not a subordinating clause that would make the claim reported or
+    # hypothetical rather than asserted
+    anchor = _ANCHOR.search(line)
+    if anchor and 0 < anchor.start() <= LEAD_WINDOW and not _SUBORD.search(line[: anchor.start()]):
+        return _match(line[anchor.start() :], turn, principal)
+    return None
 
+
+def _match(line: str, turn: Turn, principal: str) -> ExtractedFact | None:
     match = _PAT_MY.match(line)
     if match:
         noun, value = _clip(match.group(1)), _clip(match.group(2))
@@ -299,7 +334,21 @@ def _rule_fact(sentence: str, turn: Turn, principal: str) -> ExtractedFact | Non
         return _make(
             f"{principal.capitalize()} {_third(verb)} {prep} {value}.",
             principal,
-            f"{verb}s_{prep}",
+            f"{_third(verb)}_{prep}",
+            value,
+            line,
+            turn,
+        )
+
+    match = _PAT_DID.match(line)
+    if match:
+        verb, value = match.group(1).lower(), _clip(match.group(2))
+        if not _usable(value):
+            return None
+        return _make(
+            f"{principal.capitalize()} {verb} {value}.",
+            principal,
+            verb,
             value,
             line,
             turn,
@@ -398,8 +447,15 @@ def _sentences(text: str) -> list[str]:
 
 def _clip(value: str) -> str:
     """Drop a trailing independent clause, so the object stays the claim."""
-    head = _CLAUSE.split(value.strip(), maxsplit=1)[0]
-    return head.strip().strip(".,!’'\" ")
+    head = _CLAUSE.split(value.strip(), maxsplit=1)[0].strip().strip(".,!’'\" ")
+    left, sep, right = head.partition(", ")
+    # a comma joining two substantial phrases is joining two clauses; a short one
+    # ("Lisbon, Alfama", "flat white, no sugar") is part of the same value
+    if sep and len(left.split()) >= 3 and len(right.split()) >= 3:
+        head = left.strip()
+    for _ in range(2):  # "the MacBook Pro now" and "a sesame allergy as well"
+        head = _TRAIL.sub("", head).strip()
+    return head
 
 
 def _usable(value: str) -> bool:
@@ -504,5 +560,5 @@ def _dedupe(facts: list[ExtractedFact]) -> list[ExtractedFact]:
     ordered = sorted(facts, key=lambda f: f.turn_idx)
     seen: dict[str, ExtractedFact] = {}
     for fact in ordered:
-        seen.setdefault(fact.key, fact)
+        seen.setdefault(fact.triple, fact)
     return sorted(seen.values(), key=lambda f: f.turn_idx)
