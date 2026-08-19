@@ -112,6 +112,95 @@ OPEN_INTERVAL = 0  # valid_to sentinel: still true as far as memory knows
 
 
 # --------------------------------------------------------------------------- #
+# predicates
+# --------------------------------------------------------------------------- #
+
+#: A closed vocabulary for the claims people actually make about themselves.
+#:
+#: Supersession is only detectable when the same slot is named the same way
+#: twice. Left free, an extractor writes ``has_usual_order`` in January and
+#: ``prefers`` in April, and the graph never learns that the second replaced the
+#: first -- it just holds two unrelated facts and answers with whichever ranks
+#: higher. Pinning the common slots is what makes "what is it now" and "what was
+#: it in February" different questions with different answers.
+#:
+#: ``single`` means one value at a time: a new value supersedes the old. ``multi``
+#: means values accumulate, so a second one corroborates rather than replaces.
+#: Anything outside this table is free-form and treated as ``multi``, which is
+#: the safe default -- a wrong supersession silently deletes a true fact from the
+#: answerable set, while a missed one only leaves both on the record.
+PREDICATES: dict[str, str] = {
+    # identity
+    "name": "single",
+    "birthday": "single",
+    "age": "single",
+    "pronouns": "single",
+    "nationality": "single",
+    "blood_type": "single",
+    # place
+    "lives_in": "single",
+    "works_at": "single",
+    "job_title": "single",
+    "office_location": "single",
+    "born_in": "single",
+    "travelling_to": "multi",
+    "visited": "multi",
+    # health
+    "allergy": "multi",
+    "dietary_restriction": "multi",
+    "medical_condition": "multi",
+    "medication": "multi",
+    # preference
+    "usual_order": "single",
+    "preferred_drink": "single",
+    "preferred_food": "multi",
+    "preferred_time": "single",
+    "preferred_place": "single",
+    "preferred_seat": "single",
+    "dislikes": "multi",
+    "avoids": "multi",
+    # possessions and tools
+    "device": "single",
+    "vehicle": "single",
+    "pet": "multi",
+    "uses_tool": "multi",
+    # people
+    "sibling": "multi",
+    "parent": "multi",
+    "child": "multi",
+    "partner": "single",
+    "friend": "multi",
+    "colleague": "multi",
+    "manager": "single",
+    # activity and schedule
+    "training_for": "multi",
+    "attending": "multi",
+    "member_of": "multi",
+    "recurring_meeting": "single",
+    "working_on": "multi",
+    "goal": "multi",
+    # contact
+    "email": "single",
+    "phone": "single",
+    "handle": "multi",
+    # what an untrusted source asserts, kept distinct from what is true
+    "asserts": "multi",
+}
+
+#: predicates whose value is replaced rather than accumulated
+SINGLE_VALUED = frozenset(k for k, v in PREDICATES.items() if v == "single")
+
+
+def is_single_valued(predicate: str) -> bool:
+    """Whether a new value for this slot supersedes the previous one.
+
+    Unknown predicates are multi-valued: an extractor inventing a slot name must
+    not be able to cause a true fact to be marked superseded.
+    """
+    return (predicate or "").strip().lower() in SINGLE_VALUED
+
+
+# --------------------------------------------------------------------------- #
 # records
 # --------------------------------------------------------------------------- #
 
