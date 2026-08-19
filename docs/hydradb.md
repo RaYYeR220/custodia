@@ -1,9 +1,13 @@
 # Building on HydraDB
 
 Notes from putting a real workload on HydraDB, kept because the engine's shape
-changed our design rather than the other way round. Measurements below are from
-`ghcr.io/hydra-db/hydradb:latest` running in Docker on a single laptop with the
-local object store, so treat them as ratios rather than as a benchmark.
+changed our design rather than the other way round.
+
+Measurements are from `ghcr.io/hydra-db/hydradb:latest` in Docker on one laptop
+with the local object store, against an otherwise idle instance. They are ratios,
+not a benchmark: absolute figures move by an order of magnitude once anything
+else on the machine is competing for the disk, which is itself worth knowing
+before you size an ingest.
 
 ## What Custodia uses it for
 
@@ -22,9 +26,13 @@ a good property and it has a price:
 
 | write form | measured |
 |---|---|
-| one labelled `CREATE` per statement | ~12–17 rows/s |
-| `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Fact, n.text = row.text, …` | ~1 900 rows/s |
-| `UNWIND $rows AS row MATCH (s:Fact {id: row.s}), (d:Turn {id: row.d}) MERGE (s)-[r:DERIVED_FROM {id: row.rid}]->(d)` | ~1 700 edges/s |
+| one labelled `CREATE` per statement | **11 rows/s** |
+| `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Fact, n.text = row.text, …` | **5 100 rows/s** (2 000-row batch) |
+| `UNWIND $rows AS row MATCH (s:Fact {id: row.s}), (d:Turn {id: row.d}) MERGE (s)-[r:DERIVED_FROM {id: row.rid}]->(d)` | **3 600 edges/s** |
+| the same edge batch replayed unchanged | 4 900 edges/s — an idempotent retry is not a discount, but it is not a penalty either |
+
+Roughly **460x**. It is the difference between an ingest that finishes and one
+that does not.
 
 Concurrency does not help — writes serialise server-side, and 32 parallel
 single-statement writers measured the same ~17/s as one. So the ingest pipeline
@@ -32,7 +40,14 @@ stages an entire corpus in memory and flushes it as a fixed sequence of batches:
 vertices by label, then edges by type. `custodia.hydra.client` is built around
 that and nothing else.
 
-Two constraints come with the batch forms. The server admits **1024 rows per
+A third property is worth designing around: an edge batch whose endpoint does
+not exist fails the whole statement (`MATCH endpoint vertex … does not exist`)
+rather than skipping the row. That is the right behaviour — a silently dropped
+edge is a fact with no provenance — but it means the writer has to flush all
+vertices before any edge that references them, which is why `flush()` is a fixed
+sequence rather than an interleaved stream.
+
+Two further constraints come with the batch forms. The server admits **1024 rows per
 batch** (`client_query_batch_items rejected by admission control`), so batches
 are chunked and a transient rejection halves the chunk and retries. And every row
 in a batch must carry the same fields, because the statement is compiled once
