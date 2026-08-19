@@ -73,15 +73,19 @@ def to_turns(session: dict[str, Any], corpus: str, sidx: int) -> list[Turn]:
 def extractor(principal: str) -> Any:
     """The extractor the demo and the attack console both use.
 
-    Bound to the principal so first-person claims land on one subject key, and to
-    a live model when one is configured. With no credentials it falls back to the
-    rule-based extractor, which is weaker but keeps the whole path runnable.
+    Bound to the principal so first-person claims land on one subject key.
+
+    The model is always handed over, even when no credentials are configured:
+    ``enabled`` only gates *live* calls, and a shipped cache entry is still a
+    hit. That is what lets the walkthrough reproduce model-grade extraction with
+    no key at all. Windows the cache cannot serve fall back to the rule-based
+    extractor, which is weaker but keeps the path runnable.
     """
     from custodia.extract import extract_session
     from custodia.llm import LLM
 
     llm = LLM()
-    return lambda turns: extract_session(turns, llm=llm if llm.enabled else None, principal=principal)
+    return lambda turns: extract_session(turns, llm=llm, principal=principal)
 
 
 def seed_demo(client: HydraClient, *, force: bool = False, corpus: str | None = None) -> dict[str, Any]:

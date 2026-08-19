@@ -378,7 +378,9 @@ class Retriever:
         deterministic phrases below it are what retrieval actually stands on.
         """
         llm = self.llm
-        if llm is None or not getattr(llm, "enabled", False):
+        # not `enabled`: that gates live calls only, and a cached seed expansion
+        # is still a hit. The try below turns a miss into an empty list.
+        if llm is None:
             return []
         try:
             reply = llm.json(

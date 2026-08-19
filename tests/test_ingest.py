@@ -202,11 +202,13 @@ def _snapshot(client: HydraClient, name: str) -> dict[str, int]:
             schema.FACT,
             schema.ENTITY,
             schema.REJECTION,
+            schema.SOURCE,
         )
     }
     for rel, src, dst in (
         (schema.IN_CORPUS, schema.SESSION, schema.CORPUS),
         (schema.IN_SESSION, schema.TURN, schema.SESSION),
+        (schema.FROM_SOURCE, schema.TURN, schema.SOURCE),
         (schema.DERIVED_FROM, schema.FACT, schema.TURN),
         (schema.MENTIONS, schema.FACT, schema.ENTITY),
         (schema.SUPERSEDES, schema.FACT, schema.FACT),
@@ -594,6 +596,9 @@ def test_write_order_follows_the_dependency_order(recorder: _Recorder) -> None:
         schema.CORPUS,
         schema.SESSION,
         schema.TURN,
+        # a Source is written only when some turn declares a non-conversational
+        # origin, and it has to exist before the FROM_SOURCE edge to it
+        schema.SOURCE,
         schema.ENTITY,
         schema.FACT,
         schema.REJECTION,
@@ -601,6 +606,7 @@ def test_write_order_follows_the_dependency_order(recorder: _Recorder) -> None:
     assert list(recorder.edges) == [
         schema.IN_CORPUS,
         schema.IN_SESSION,
+        schema.FROM_SOURCE,
         schema.DERIVED_FROM,
         schema.MENTIONS,
         schema.SUPERSEDES,
@@ -679,9 +685,12 @@ def test_end_to_end_against_hydradb(graph: HydraClient, corpus: str) -> None:
     # exactly one of the seven turns trips a rule: the other six are ordinary
     # conversation and must survive turn-level screening untouched
     assert sum(1 for s in SESSIONS for t in s["turns"] if Policy().screen(t["text"])) == 1
+    # the shared document is one Source, however many turns carried it
+    assert counts[schema.SOURCE] == 1
+    assert counts[schema.FROM_SOURCE] == 1
     assert sum(counts[rel] for rel in (
-        schema.IN_CORPUS, schema.IN_SESSION, schema.DERIVED_FROM, schema.MENTIONS,
-        schema.SUPERSEDES, schema.CONTRADICTS, schema.CORROBORATES,
+        schema.IN_CORPUS, schema.IN_SESSION, schema.FROM_SOURCE, schema.DERIVED_FROM,
+        schema.MENTIONS, schema.SUPERSEDES, schema.CONTRADICTS, schema.CORROBORATES,
         schema.BLOCKED, schema.RAISED_BY,
     )) == report.edges
 

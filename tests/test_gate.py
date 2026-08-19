@@ -422,13 +422,20 @@ def test_with_no_model_a_decisive_warrant_is_quoted_verbatim(settings):
     assert gate.CHECK_EXTRACTIVE in verdict.checks
 
 
-def test_a_disabled_model_takes_the_same_path(settings):
+def test_a_disabled_model_is_still_asked_so_a_cache_can_answer(settings):
+    """`enabled` gates live calls, not the on-disk cache.
+
+    A shipped cache is how the walkthrough reproduces model-grade answers with
+    no credentials, so the gate has to attempt the call and let the client
+    decide whether it can be served. A miss raises, and that is what routes to
+    the deterministic path - see the test below.
+    """
     llm = StubLLM(good_reply(GYM), enabled=False)
     verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is True
-    assert verdict.model == gate.EXTRACTIVE_MODEL
-    assert llm.calls == []
+    assert verdict.model != gate.EXTRACTIVE_MODEL
+    assert llm.calls
 
 
 def test_a_provider_that_cannot_complete_falls_back_to_quoting(settings):

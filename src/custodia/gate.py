@@ -312,7 +312,11 @@ class Gate:
             return abstain(CHECK_WARRANT)
 
         checks.append(CHECK_MODEL)
-        if self.llm is None or not getattr(self.llm, "enabled", False):
+        # `enabled` reports whether a *live* call is possible; it says nothing
+        # about the on-disk cache. Attempt the call regardless and let
+        # LLMUnavailable route a miss to the deterministic path, so a shipped
+        # cache answers exactly as the model that produced it did.
+        if self.llm is None:
             return quote(CHECK_MODEL)
 
         checks.append(CHECK_JSON)
