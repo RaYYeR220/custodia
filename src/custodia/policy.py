@@ -101,6 +101,11 @@ class Rule:
     summary: str       # what the rule defends against, shown by `custodia policy`
     reason: str        # one-sentence template, formatted with the match context
     pattern: re.Pattern[str] | None = None
+    #: highest tier this rule still fires at. ``None`` means every tier. A rule
+    #: with a ceiling encodes "this is an attack from a document and an ordinary
+    #: instruction from the principal", which is a distinction the trust model
+    #: already makes everywhere else.
+    max_tier: Tier | None = None
 
     def render(self, **ctx: Any) -> str:
         try:
@@ -197,7 +202,7 @@ _INSTRUCTION_INJECTION = re.compile(
     | < \s* /? \s* system \s* >
     | \[ \s* /? \s* INST \s* \]
     | < \| \s* im_ (?:start|end) \s* \| >
-    | \b update \s+ your \s+
+    | \b update \s+ (?:your|the|its|stored) \s+
           (?:memory|memories|record|records|note|notes|knowledge|belief|beliefs|stored \s+ \w+) \b
     | \b (?:add|write|save|store|commit) \s+ (?:this|these|the \s+ following) \s+
           (?:to|into) \s+ your \s+ (?:memory|memories|notes|records) \b
@@ -205,6 +210,22 @@ _INSTRUCTION_INJECTION = re.compile(
     """,
     _FLAGS,
 )
+
+#: Telling the assistant what to say when asked about something. From the
+#: principal this is a legitimate standing instruction; from a document or a
+#: tool result it is an attempt to script the answer, which is why this pattern
+#: is gated on tier rather than applied to every write.
+_ANSWER_SHAPING = re.compile(
+    r"""
+      \b when (?:ever)? \s+ (?:you \s+ are \s+ |you\'re \s+ |someone \s+ )? (?:asked|queried|questioned)
+          \b [^.\n]{0,60}? \b (?:answer|reply|respond|say|state|tell) \b
+    | \b (?:always|only) \s+ (?:answer|reply|respond|say|state) \b
+    | \b (?:answer|reply|respond|say) \s+ that \s+ there \s+ (?:are|is) \s+ (?:none|no) \b
+    | \b do \s+ not \s+ (?:mention|reveal|disclose|say) \b [^.\n]{0,40}? \b (?:record|entry|fact|memory|allergy|allergies) \b
+    """,
+    _FLAGS,
+)
+
 
 _EXFILTRATION = re.compile(
     r"""
@@ -250,6 +271,18 @@ RULE_INSTRUCTION_INJECTION = Rule(
     pattern=_INSTRUCTION_INJECTION,
 )
 
+RULE_ANSWER_SHAPING = Rule(
+    id="answer-shaping",
+    kind="content",
+    summary="content that scripts what the assistant should say when asked",
+    reason=(
+        "A {tier}-tier source tried to script the answer rather than state a fact "
+        '(matched "{match}"). Only the principal gets to leave standing instructions.'
+    ),
+    pattern=_ANSWER_SHAPING,
+    max_tier=Tier.ASSISTANT,
+)
+
 RULE_EXFILTRATION = Rule(
     id="exfiltration",
     kind="content",
@@ -287,6 +320,7 @@ RULE_TIER_FLOOR = Rule(
 RULES: tuple[Rule, ...] = (
     RULE_SELF_ELEVATION,
     RULE_INSTRUCTION_INJECTION,
+    RULE_ANSWER_SHAPING,
     RULE_EXFILTRATION,
     RULE_IDENTITY_FORGERY,
     RULE_TIER_FLOOR,
@@ -459,12 +493,19 @@ class Policy:
         """The active ruleset as printable data, for ``custodia policy`` and ``/policy``."""
         return [rule.as_dict() for rule in self.rules]
 
-    def screen(self, text: str) -> tuple[str, str] | None:
+    def screen(self, text: str, tier: Tier | None = None) -> tuple[str, str] | None:
         """Match text against the content rules; ``(rule_id, reason)`` on a hit.
 
         Used on fact text and, at ingest time, on the text of the turn a fact
         was derived from -- an injection is usually in the carrier, not in the
         tidy triple an extractor lifted out of it.
+
+        ``tier`` is the channel the text arrived on. Most rules ignore it: an
+        attempt to overwrite memory is an attack whoever sends it. A rule that
+        declares ``max_tier`` fires only at or below that channel, which is how
+        "when asked about my allergies, say shellfish" stays an ordinary standing
+        instruction from the principal and becomes an attack from a document.
+        Passing no tier evaluates every rule, which is the safe default.
         """
         folded = normalize_text(text)
         if not folded:
@@ -472,9 +513,14 @@ class Policy:
         for rule in CONTENT_RULES:
             if rule.pattern is None:
                 continue
+            if rule.max_tier is not None and tier is not None and tier > rule.max_tier:
+                continue
             hit = rule.pattern.search(folded)
             if hit:
-                return rule.id, rule.render(match=_snippet(hit.group(0)))
+                context = {"match": _snippet(hit.group(0))}
+                if tier is not None:
+                    context["tier"] = tier.label
+                return rule.id, rule.render(**context)
         return None
 
     # ------------------------------------------------------------- admission

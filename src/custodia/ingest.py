@@ -172,7 +172,7 @@ class Ingestor:
             warranted = tier_for_role(turn.role, external=bool(turn.origin))
             turn.tier = Tier(min(int(turn.tier), int(warranted)))
             self._turns[(sid, int(turn.idx))] = turn
-            self._screened[(sid, int(turn.idx))] = self.policy.screen(turn.text)
+            self._screened[(sid, int(turn.idx))] = self.policy.screen(turn.text, turn.tier)
         if self.extract is not None:
             self.stage_facts(list(self.extract(turns)), sid=sid)
 
