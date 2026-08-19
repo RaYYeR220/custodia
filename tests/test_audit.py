@@ -15,7 +15,7 @@ import pytest
 from custodia import ids, schema
 from custodia.audit import ABSTAINED, ANSWERED, Auditor
 from custodia.gate import Verdict
-from custodia.hydra.client import HydraClient
+from custodia.hydra.client import HydraClient, HydraError
 from custodia.retrieve import Warrant
 from custodia.schema import Evidence, Tier
 
@@ -41,8 +41,12 @@ F_BAD = fid("gym|is|payload")
 
 
 def wipe(client: HydraClient) -> None:
+    """Best-effort cleanup; see the note in test_retrieve on the shared instance."""
     for label in LABELS:
-        client.run(f"MATCH (n:{label}) WHERE n.corpus = $c DETACH DELETE n", c=CORPUS)
+        try:
+            client.run(f"MATCH (n:{label} {{corpus: $c}}) DETACH DELETE n", c=CORPUS)
+        except HydraError:
+            pass
 
 
 def seed(client: HydraClient) -> None:
@@ -224,12 +228,12 @@ def test_an_answer_is_written_back_with_its_citations(auditor: Auditor, client):
 
     assert answer_id == ids.answer_id(CORPUS, ids.query_id(CORPUS, warrant.question, 9_001))
     cited = client.run(
-        "MATCH (a:Answer)-[:CITES]->(f:Fact) WHERE a.id = $a RETURN f.id AS id", a=answer_id
+        "MATCH (a:Answer {id: $a})-[:CITES]->(f:Fact) RETURN f.id AS id", a=answer_id
     )
     assert [int(row["id"]) for row in cited] == [F_NEW]
 
     linked = client.run(
-        "MATCH (a:Answer)-[:ANSWERS]->(q:Query) WHERE a.id = $a RETURN q.text AS text",
+        "MATCH (a:Answer {id: $a})-[:ANSWERS]->(q:Query) RETURN q.text AS text",
         a=answer_id,
     )
     assert linked[0]["text"] == warrant.question
@@ -240,7 +244,7 @@ def test_the_query_is_linked_to_the_entities_it_asked_about(auditor: Auditor, cl
     auditor.record(warrant.question, warrant, verdict_of(warrant))
 
     rows = client.run(
-        "MATCH (q:Query)-[:ASKED_ABOUT]->(e:Entity) WHERE q.id = $q RETURN e.norm AS norm",
+        "MATCH (q:Query {id: $q})-[:ASKED_ABOUT]->(e:Entity) RETURN e.norm AS norm",
         q=ids.query_id(CORPUS, warrant.question, 9_002),
     )
     assert [row["norm"] for row in rows] == [GYM]
@@ -382,7 +386,7 @@ def test_integrity_catches_a_fact_with_no_provenance(auditor: Auditor, client):
         assert report["orphan_facts"] == 1
         assert report["orphan_ids"] == [orphan]
     finally:
-        client.run("MATCH (f:Fact) WHERE f.id = $f DETACH DELETE f", f=orphan)
+        client.run("MATCH (f:Fact {id: $f}) DETACH DELETE f", f=orphan)
 
     assert auditor.integrity()["ok"] is True
 
@@ -391,7 +395,7 @@ def test_integrity_catches_a_supersedes_edge_into_a_vanished_fact(auditor: Audit
     # HydraDB has no IS NULL, so the check compares the endpoints a labelled
     # pattern matches against the endpoints an unlabelled one does. Stripping
     # the label off the target is the cheapest way to produce that difference.
-    client.run("MATCH (f:Fact) WHERE f.id = $f REMOVE f:Fact", f=F_OLD)
+    client.run("MATCH (f:Fact {id: $f}) REMOVE f:Fact", f=F_OLD)
     try:
         report = auditor.integrity()
         assert report["ok"] is False
@@ -429,7 +433,7 @@ def test_integrity_catches_an_answer_that_cited_quarantined_evidence(auditor: Au
         assert report["quarantined_warrantable"] == 1
         assert report["quarantined_cited"] == [F_BAD]
     finally:
-        client.run("MATCH (a:Answer) WHERE a.id = $a DETACH DELETE a", a=answer_id)
+        client.run("MATCH (a:Answer {id: $a}) DETACH DELETE a", a=answer_id)
 
     assert auditor.integrity()["ok"] is True
 

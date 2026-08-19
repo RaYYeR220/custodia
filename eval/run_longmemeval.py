@@ -73,30 +73,36 @@ def _first(module: Any, names: Sequence[str]) -> Any | None:
 class CustodiaSystem:
     """Adapter onto Custodia: ingest one instance, then ask its question.
 
-    The expected contract, in the order it is tried:
+    It binds to the interfaces ``src/custodia`` actually publishes:
 
     ingest
-        ``custodia.ingest.Ingestor(client, corpus=...)`` exposing
-        ``add_turn(sid=, sidx=, idx=, role=, text=, ts=, tier=, origin=)`` and
-        ``flush()``; or a module-level
-        ``ingest_sessions(client, corpus, sessions)`` /
-        ``ingest_turns(client, corpus, turns)``.
+        ``custodia.ingest.ingest_sessions(client, corpus, sessions)`` where a
+        session is a mapping with ``sid`` / ``ts`` / ``turns``, and a turn is a
+        mapping with ``role`` / ``text`` / ``ts`` / ``tier`` / ``origin``.
+        Sessions are handed over as plain mappings rather than :class:`EvalTurn`
+        objects on purpose: the eval record calls its field ``content`` and has
+        no tier, and letting the ingestor infer either would put the harness's
+        assumptions inside the system under test.
 
-    answer
-        ``custodia.gate.Gate(client, corpus=...)`` exposing
-        ``answer(question, asked_at=...)`` whose result carries ``text`` (or
-        ``answer``), ``abstained`` and ``citations``; or a module-level
-        ``answer(client, corpus, question, asked_at=...)``.
+    retrieve + answer
+        ``custodia.retrieve.Retriever(client, corpus, index=...)`` feeding
+        ``custodia.gate.Gate(retriever).ask(question, as_of=...)``, which returns
+        a ``Verdict`` carrying ``answered`` / ``answer`` / ``citations`` /
+        ``abstained_because`` / ``warrant``.
+
+    The lexical index is rebuilt from the graph after each ingest, because the
+    retriever seeds on it and a retriever handed ``index=None`` silently loses
+    every fact no entity extractor caught -- which would understate Custodia and
+    still look like a result.
 
     Anything missing raises :class:`MissingIntegration` naming what was looked
-    for. The runner records that as a skipped system; it never substitutes an
-    answer.
+    for. The runner records that as a skipped system; it never invents an answer.
     """
 
     name: str = "custodia"
     corpus_prefix: str = "eval-"
     client: Any = None
-    _ingestor: Any = None
+    llm: Any = None
 
     def connect(self) -> Any:
         if self.client is None:
@@ -116,6 +122,36 @@ class CustodiaSystem:
         """One corpus per question, so haystacks cannot leak into each other."""
         return f"{self.corpus_prefix}{instance.qid}"
 
+    @staticmethod
+    def as_payload(sessions: Sequence[Any]) -> list[dict[str, Any]]:
+        """Eval sessions as the mappings ``ingest_sessions`` accepts.
+
+        Turn timestamps are the session time plus the turn's position, so order
+        within a session survives into the graph. Without that every turn in a
+        session shares one timestamp and any within-session ordering question
+        becomes unanswerable for reasons that are the harness's fault.
+        """
+        payload: list[dict[str, Any]] = []
+        for session in sessions:
+            payload.append(
+                {
+                    "sid": session.sid,
+                    "ts": session.ts,
+                    "turns": [
+                        {
+                            "role": turn.role,
+                            "text": turn.content,
+                            "ts": session.ts + idx,
+                            "idx": idx,
+                            "tier": _tier_for(turn.role),
+                            "origin": "",
+                        }
+                        for idx, turn in enumerate(session.turns)
+                    ],
+                }
+            )
+        return payload
+
     def ingest(self, instance: Instance) -> dict[str, Any]:
         client = self.connect()
         corpus = self.corpus_for(instance)
@@ -124,86 +160,90 @@ class CustodiaSystem:
         except ImportError as exc:
             raise MissingIntegration(f"custodia.ingest is not importable: {exc}") from exc
 
+        fn = _first(ingest_module, ("ingest_sessions", "ingest_instance"))
+        if fn is None:
+            raise MissingIntegration(
+                "custodia.ingest exposes neither ingest_sessions nor ingest_instance"
+            )
         started = time.perf_counter()
-        factory = _first(ingest_module, ("Ingestor", "Ingest", "CorpusWriter"))
-        if factory is not None:
-            writer = factory(client, corpus=corpus)
-            for sidx, session in enumerate(instance.sessions):
-                for idx, turn in enumerate(session.turns):
-                    writer.add_turn(
-                        sid=session.sid,
-                        sidx=sidx,
-                        idx=idx,
-                        role=turn.role,
-                        text=turn.content,
-                        ts=session.ts + idx,
-                        tier=_tier_for(turn.role),
-                        origin="",
-                    )
-            stats = writer.flush()
-        else:
-            fn = _first(ingest_module, ("ingest_sessions", "ingest_instance", "ingest_turns"))
-            if fn is None:
-                raise MissingIntegration(
-                    "custodia.ingest exposes none of: Ingestor / Ingest / CorpusWriter / "
-                    "ingest_sessions / ingest_instance / ingest_turns"
-                )
-            stats = fn(client, corpus, instance.sessions)
+        report = fn(client, corpus, self.as_payload(instance.sessions))
         elapsed = (time.perf_counter() - started) * 1000
         return {
             "corpus": corpus,
             "ingest_ms": round(elapsed, 1),
-            "ingest_stats": stats if isinstance(stats, dict) else str(stats),
+            "ingest_report": _report_dict(report),
         }
+
+    def build_index(self, corpus: str) -> Any:
+        """Rebuild the BM25 index the retriever seeds on. ``None`` if unavailable."""
+        try:
+            from custodia.lexical import LexicalIndex
+        except ImportError:
+            return None
+        try:
+            return LexicalIndex.build(self.connect(), corpus)
+        except Exception:
+            return None
 
     def answer(self, instance: Instance) -> BaselineAnswer:
         client = self.connect()
         corpus = self.corpus_for(instance)
         try:
-            from custodia import gate as gate_module
+            from custodia.gate import Gate
+            from custodia.retrieve import Retriever
         except ImportError as exc:
-            raise MissingIntegration(f"custodia.gate is not importable: {exc}") from exc
+            raise MissingIntegration(f"custodia.gate/retrieve is not importable: {exc}") from exc
 
+        index = self.build_index(corpus)
+        retriever = Retriever(client, corpus, index=index)
+        gate = Gate(retriever)
         started = time.perf_counter()
-        gate_class = _first(gate_module, ("Gate", "AnswerGate"))
-        if gate_class is not None:
-            gate = gate_class(client, corpus=corpus)
-            result = gate.answer(instance.question, asked_at=instance.asked_at)
-        else:
-            fn = _first(gate_module, ("answer", "ask"))
-            if fn is None:
-                raise MissingIntegration(
-                    "custodia.gate exposes none of: Gate / AnswerGate / answer / ask"
-                )
-            result = fn(client, corpus, instance.question, asked_at=instance.asked_at)
+        verdict = gate.ask(instance.question, as_of=None)
         elapsed = (time.perf_counter() - started) * 1000
 
-        text = _text_of(result)
-        abstained = getattr(result, "abstained", None)
-        if abstained is None and isinstance(result, dict):
-            abstained = result.get("abstained")
-        citations = getattr(result, "citations", None)
-        if citations is None and isinstance(result, dict):
-            citations = result.get("citations")
-        prompt_tokens = getattr(result, "prompt_tokens", 0) or 0
-        if not prompt_tokens:
-            warrant = getattr(result, "warrant", None)
-            prompt_tokens = estimate_tokens(str(warrant)) if warrant else estimate_tokens(text)
+        text = str(getattr(verdict, "answer", "") or "")
+        answered = getattr(verdict, "answered", None)
+        citations = getattr(verdict, "citations", None) or []
+        warrant = getattr(verdict, "warrant", None)
+        prompt_tokens = estimate_tokens(_warrant_text(warrant)) if warrant is not None else 0
 
         return BaselineAnswer(
             text=text.strip(),
-            prompt_tokens=int(prompt_tokens),
-            latency_ms=round(elapsed, 1),
+            prompt_tokens=prompt_tokens,
+            latency_ms=round(getattr(verdict, "latency_ms", 0) or elapsed, 1),
             truncated=False,
             notes={
-                "abstained_flag": bool(abstained) if abstained is not None else None,
-                "citations": len(citations) if citations is not None else None,
+                # the gate's own structured flag, not a phrase heuristic
+                "abstained_flag": (not bool(answered)) if answered is not None else None,
+                "abstained_because": str(getattr(verdict, "abstained_because", "") or ""),
+                "citations": len(citations),
+                "verified": getattr(verdict, "verified", None),
+                "warrant_facts": len(getattr(warrant, "evidence", []) or []),
+                "warrant_quarantined_seen": getattr(warrant, "quarantined_seen", None),
+                "index": "custodia.lexical" if index is not None else "none (lexical seeding off)",
                 "corpus": corpus,
             },
         )
 
     def provenance(self) -> dict[str, Any]:
         return {"system": self.name, "corpus_prefix": self.corpus_prefix}
+
+
+def _report_dict(report: Any) -> Any:
+    if isinstance(report, dict):
+        return report
+    fields = getattr(type(report), "__dataclass_fields__", None)
+    if fields:
+        return {name: getattr(report, name, None) for name in fields}
+    return str(report)
+
+
+def _warrant_text(warrant: Any) -> str:
+    """The evidence text a warrant would put in front of the model."""
+    evidence = getattr(warrant, "evidence", None)
+    if evidence is None:
+        return str(warrant)
+    return "\n".join(str(getattr(e, "text", e)) for e in evidence)
 
 
 def _tier_for(role: str) -> str:
@@ -221,20 +261,6 @@ def _tier_for(role: str) -> str:
     if lowered in {"tool", "function", "observation"}:
         return "tool"
     return "external"
-
-
-def _text_of(result: Any) -> str:
-    if isinstance(result, str):
-        return result
-    for attr in ("text", "answer", "content"):
-        value = getattr(result, attr, None)
-        if isinstance(value, str):
-            return value
-    if isinstance(result, dict):
-        for key in ("text", "answer", "content"):
-            if isinstance(result.get(key), str):
-                return str(result[key])
-    return str(result)
 
 
 # --------------------------------------------------------------------------- #

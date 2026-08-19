@@ -71,11 +71,23 @@ def test_containment_is_one_directional() -> None:
         "You never mentioned buying cows.",
         "Based on the provided chat, there is no information related to that.",
         "I cannot determine this from our conversations.",
+        # phrasings a long-context model actually produced in a real run
+        "The provided material does not contain information about your job.",
+        "INSUFFICIENT EVIDENCE: the sessions never mention a gym.",
+        "The material does not specify the total cost.",
+        "That detail is not provided anywhere in the conversations.",
         "",
     ],
 )
 def test_abstention_phrasings_are_recognised(text: str) -> None:
     assert looks_like_abstention(text) is True
+
+
+def test_the_baselines_get_a_canonical_abstention_token() -> None:
+    """Otherwise the baselines are scored on phrasing luck, not on behaviour."""
+    from eval.baselines import ABSTENTION_TOKEN
+
+    assert looks_like_abstention(f"{ABSTENTION_TOKEN}: nothing in the sessions covers this.")
 
 
 @pytest.mark.parametrize(
@@ -144,6 +156,15 @@ def test_fallback_judge_is_labelled_as_weaker() -> None:
     assert verdict.correct is True
     assert verdict.method == "lexical-fallback"
     assert verdict.is_fallback is True
+
+
+def test_fallback_judge_accepts_any_gold_alternative() -> None:
+    """LongMemEval golds name alternatives; requiring the whole string is wrong."""
+    gold = "14 days. 15 days (including the last day) is also acceptable."
+    verdict = fallback_judge("q?", gold, "14 days passed between the two events.",
+                             "temporal-reasoning")
+    assert verdict.correct is True
+    assert fallback_judge("q?", gold, "22 days passed.", "temporal-reasoning").correct is False
 
 
 def test_fallback_judge_matches_numbers_and_dates() -> None:

@@ -91,7 +91,7 @@ Custodia is an MCP server, so any MCP-capable agent can use it as its memory:
     "custodia": {
       "command": "custodia",
       "args": ["mcp"],
-      "env": { "HYDRA_URI": "neo4j://127.0.0.1:7687" }
+      "env": { "HYDRA_URI": "bolt://127.0.0.1:7687" }
     }
   }
 }
@@ -125,7 +125,7 @@ warrant is the only thing the answering model ever sees.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `HYDRA_URI` | `neo4j://127.0.0.1:7687` | HydraDB Bolt endpoint |
+| `HYDRA_URI` | `bolt://127.0.0.1:7687` | HydraDB Bolt endpoint |
 | `HYDRA_TOKEN` | `local-development-token-32-bytes` | HydraDB auth token |
 | `CUSTODIA_CORPUS` | `default` | which memory to read and write |
 | `CUSTODIA_LLM_BASE_URL` | OpenRouter | any OpenAI-compatible endpoint |

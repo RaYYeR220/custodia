@@ -19,7 +19,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _env(name: str, default: str = "") -> str:
-    return os.environ.get(name, default).strip()
+    """Read a setting, treating an empty value as absent.
+
+    Container orchestration passes ``VAR=`` for anything the operator did not
+    fill in, and an empty string is not what the caller meant by "unset" - it
+    would silently blank a model name that has a perfectly good default.
+    """
+    return (os.environ.get(name) or default).strip()
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -40,7 +46,7 @@ def _num(name: str, default: float) -> float:
 @dataclass(slots=True)
 class Settings:
     # --- graph -------------------------------------------------------------
-    hydra_uri: str = field(default_factory=lambda: _env("HYDRA_URI", "neo4j://127.0.0.1:7687"))
+    hydra_uri: str = field(default_factory=lambda: _env("HYDRA_URI", "bolt://127.0.0.1:7687"))
     hydra_token: str = field(
         default_factory=lambda: _env("HYDRA_TOKEN", "local-development-token-32-bytes")
     )
@@ -72,6 +78,9 @@ class Settings:
     llm_timeout: float = field(default_factory=lambda: _num("CUSTODIA_LLM_TIMEOUT", 90.0))
     llm_retries: int = field(default_factory=lambda: int(_num("CUSTODIA_LLM_RETRIES", 3)))
     llm_concurrency: int = field(default_factory=lambda: int(_num("CUSTODIA_LLM_CONCURRENCY", 8)))
+    #: client-side request pacing, deliberately under the provider ceiling.
+    #: 0 disables it. A throttled run measures the provider, not the system.
+    llm_rpm: float = field(default_factory=lambda: _num("CUSTODIA_LLM_RPM", 85.0))
 
     # --- cache -------------------------------------------------------------
     #: responses are content-addressed on disk, so a re-run costs nothing and a

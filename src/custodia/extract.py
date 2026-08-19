@@ -11,6 +11,16 @@ the context prefix is labelled and its indices are refused by the parser. Facts
 therefore cannot be attributed twice, and cannot be attributed to a turn the model
 never saw.
 
+*The predicate is a slot, not a phrase.* A model asked for a "snake_case verb
+phrase" will write ``holds_title`` one day and ``job_title`` the next, and two
+names for one slot means the graph holds two unrelated facts where it should
+hold a supersession - which is most of what this product claims to do. So the
+prompt carries the vocabulary from :data:`custodia.schema.PREDICATES`, and
+whatever comes back is folded onto it here. Folding never invents: a predicate
+the schema does not know survives as free-form, where it is merely unqueryable
+rather than wrong, because unknown predicates are multi-valued and a wrong slot
+would make memory retire a fact that is still true.
+
 *The model is never the last word.* Anything it returns is filtered against the
 schema (unknown keys dropped, turn index range-checked, timestamps re-derived from
 the turn when unstated) because the reply is generated from captured content, and
@@ -31,7 +41,7 @@ from typing import Any, Iterable, Sequence
 
 from custodia import config, prompts
 from custodia.llm import LLM
-from custodia.schema import OPEN_INTERVAL, OWNER_ROLES, Turn
+from custodia.schema import OPEN_INTERVAL, OWNER_ROLES, PREDICATES, Tier, Turn
 
 log = logging.getLogger("custodia.extract")
 
@@ -45,6 +55,54 @@ LLM_CONF = 0.7
 
 MAX_ENTITIES = 12
 MAX_RULE_FACTS = 6
+
+#: Spellings that mean a slot the schema already names. Kept short on purpose:
+#: the generic rules below (snake-casing, dropping a leading ``has_``/``is_``)
+#: cover most drift, and every entry here is a judgement about meaning that the
+#: vocabulary in ``schema.PREDICATES`` should eventually make unnecessary.
+#: Nothing here invents a slot - a fold is only taken when the target exists.
+PREDICATE_SYNONYMS: dict[str, str] = {
+    "has_usual_order": "usual_order",
+    "has_usual": "usual_order",
+    "usual": "usual_order",
+    "orders": "usual_order",
+    "prefers_drink": "usual_order",
+    # a slot the vocabulary used to carry: two single-valued homes for one idea
+    # is how a supersession goes missing, so anything still spelling it the old
+    # way folds onto the one that survived
+    "preferred_drink": "usual_order",
+    "preferred_order": "usual_order",
+    "holds_title": "job_title",
+    "title": "job_title",
+    "role": "job_title",
+    "position": "job_title",
+    "allergic_to": "allergy",
+    "has_allergy": "allergy",
+    "works_for": "works_at",
+    "employed_by": "works_at",
+    "employer": "works_at",
+    "has_sibling": "sibling",
+    "uses_device": "device",
+    "is_using": "uses_tool",
+    "uses": "uses_tool",
+    "based_in": "lives_in",
+    "located_in": "lives_in",
+    "lives_at": "lives_in",
+    "is_in": "lives_in",
+}
+
+#: A predicate naming a value that has already ended. The end of an interval is
+#: ``valid_to`` on the fact that is ending, which reconciliation derives from the
+#: value that replaced it; a slot of its own would hide the supersession behind a
+#: name no question ever asks for.
+_ENDED_PREFIXES = ("previously_", "formerly_", "former_", "used_to_", "past_", "ex_", "old_")
+_ENDED_SUFFIXES = ("_previously", "_before", "_until", "_formerly")
+
+#: subjects that mean "the person whose memory this is"
+_SELF_SUBJECTS = frozenset(
+    {"i", "me", "my", "mine", "myself", "user", "the user", "principal", "the principal",
+     "owner", "the owner", "self"}
+)
 
 
 @dataclass(slots=True)
@@ -135,7 +193,7 @@ def extract_corpus(
     for (index, win), reply in zip(plans, replies):
         if isinstance(reply, dict):
             # a model that legitimately found nothing is not a failed window
-            out[index].extend(_parse(reply, win))
+            out[index].extend(_parse(reply, win, principal))
         else:
             out[index].extend(extract_rules(win.claim, principal=principal))
     return [_dedupe(facts) for facts in out]
@@ -189,7 +247,58 @@ def _windows(turns: Sequence[Turn], window: int, overlap: int) -> list[_Window]:
 # ---- model replies -------------------------------------------------------- #
 
 
-def _parse(reply: dict[str, Any], win: _Window) -> list[ExtractedFact]:
+def canonical_predicate(raw: str) -> str:
+    """Fold a predicate onto the schema's vocabulary where it belongs there.
+
+    Three passes, cheapest first: snake-case it, look it up in the synonym table,
+    and - only if that found nothing - try it without a leading ``has_``/``is_``.
+    A predicate the vocabulary does not know survives unchanged rather than being
+    forced onto the nearest slot; an unknown predicate is merely unqueryable,
+    while a wrong one makes memory supersede a fact that is still true.
+    """
+    predicate = _snake(raw)
+    if not predicate:
+        return ""
+    predicate = PREDICATE_SYNONYMS.get(predicate, predicate)
+    if predicate in PREDICATES:
+        return predicate
+    for prefix in ("has_", "is_", "have_"):
+        if predicate.startswith(prefix):
+            stem = predicate[len(prefix) :]
+            stem = PREDICATE_SYNONYMS.get(stem, stem)
+            if stem in PREDICATES:
+                return stem
+    return predicate
+
+
+def _has_ended(predicate: str) -> bool:
+    return predicate.startswith(_ENDED_PREFIXES) or predicate.endswith(_ENDED_SUFFIXES)
+
+
+def _principal_subject(subject: str, principal: str) -> str:
+    """One key for the principal, whatever the message called them."""
+    key = _norm(principal)
+    if not subject or not key:
+        return subject
+    if subject == key or subject in _SELF_SUBJECTS:
+        return key
+    # "nora salgado" is the same person as "nora"; "nora's manager" is not
+    words = subject.split()
+    if len(words) <= 4 and key in words:
+        return key
+    return subject
+
+
+def _untrusted(turn: Turn) -> bool:
+    """Whether the turn is quoted material rather than a party to the conversation."""
+    return bool(turn.origin) or int(turn.tier) <= int(Tier.TOOL)
+
+
+def _source_key(turn: Turn) -> str:
+    return _norm(turn.origin) or _norm(turn.role) or "external source"
+
+
+def _parse(reply: dict[str, Any], win: _Window, principal: str) -> list[ExtractedFact]:
     items = reply.get("facts")
     if not isinstance(items, list):
         # `LLM.json` wraps a bare array under `items`
@@ -203,13 +312,17 @@ def _parse(reply: dict[str, Any], win: _Window) -> list[ExtractedFact]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        fact = _fact_from(item, by_index)
+        fact = _fact_from(item, by_index, principal)
         if fact is not None:
             facts.append(fact)
     return facts
 
 
-def _fact_from(item: dict[str, Any], claimable: dict[int, Turn]) -> ExtractedFact | None:
+def _fact_from(
+    item: dict[str, Any],
+    claimable: dict[int, Turn],
+    principal: str,
+) -> ExtractedFact | None:
     # only the documented fields are read; a reply that invents keys - including
     # one lifted out of an injected instruction - contributes nothing through them
     fields = {k: v for k, v in item.items() if k in prompts.EXTRACT_FIELDS}
@@ -224,15 +337,29 @@ def _fact_from(item: dict[str, Any], claimable: dict[int, Turn]) -> ExtractedFac
         log.debug("dropping fact attributed outside the window: %r", text[:60])
         return None
 
-    subject = _norm(_text(fields.get("subject")))
-    predicate = _snake(_text(fields.get("predicate")))
+    predicate = canonical_predicate(_text(fields.get("predicate")))
+    if _has_ended(predicate):
+        log.debug("dropping ended-value predicate %r: %r", predicate, text[:60])
+        return None
+
+    subject = _principal_subject(_norm(_text(fields.get("subject"))), principal)
     obj = _norm(_text(fields.get("object")))
+    if _untrusted(turn):
+        # one shape for "an untrusted source claimed X", whatever the reply said:
+        # the source is the subject and the claim is the object, so nothing lifted
+        # out of a document can be shelved next to what the principal said
+        subject = _source_key(turn)
+        predicate = "asserts"
+        obj = _norm(text)
+        if subject not in text.lower():
+            text = f"{subject} asserts: {text}"
+
     return ExtractedFact(
         text=text,
         subject=subject,
         predicate=predicate,
         object=obj,
-        entities=_entities(fields.get("entities"), subject),
+        entities=_entities(fields.get("entities"), subject, principal),
         turn_idx=turn.idx,
         valid_from=_epoch(fields.get("valid_from"), turn.ts),
         valid_to=_epoch(fields.get("valid_to"), OPEN_INTERVAL),
@@ -241,7 +368,7 @@ def _fact_from(item: dict[str, Any], claimable: dict[int, Turn]) -> ExtractedFac
     )
 
 
-def _entities(raw: Any, subject: str) -> list[str]:
+def _entities(raw: Any, subject: str, principal: str) -> list[str]:
     out: list[str] = []
     if isinstance(raw, (list, tuple)):
         for item in raw:
@@ -249,8 +376,10 @@ def _entities(raw: Any, subject: str) -> list[str]:
             if norm and norm not in out:
                 out.append(norm)
     # the subject is what retrieval seeds on, so it has to be reachable through
-    # MENTIONS - except when it is the principal, whose hub adds no selectivity
-    if subject and subject not in out and subject not in _PRONOUN_SUBJECTS:
+    # MENTIONS - except when it is the principal, who appears in every fact and
+    # so seeds nothing
+    skip = _PRONOUN_SUBJECTS | {_norm(principal)}
+    if subject and subject not in out and subject not in skip:
         out.insert(0, subject)
     return out[:MAX_ENTITIES]
 
@@ -269,6 +398,7 @@ _PAT_DID = re.compile(rf"^i(?:['’]ve|\s+have)?\s+({_DID_VERBS})\s+(.+)$", re.I
 _PAT_AT = re.compile(r"^i(?:'m|\s+am)\s+(in|at|from)\s+(.+)$", re.I)
 _PAT_ING = re.compile(r"^i(?:'m|\s+am)\s+(\w+ing)\s+(.+)$", re.I)
 _PAT_PREF = re.compile(rf"^i\s+{_HEDGES}({_PREF_VERBS})\s+(.+)$", re.I)
+_PAT_ALLERGIC = re.compile(r"^i(?:'m|\s+am)\s+allergic\s+to\s+(.+)$", re.I)
 _PAT_IS = re.compile(r"^i(?:'m|\s+am)\s+(.+)$", re.I)
 
 _LEAD = re.compile(r"^(?:and|but|so|also|plus|then|ok|okay|yes|no|well|oh)[,\s]+", re.I)
@@ -290,6 +420,23 @@ _SUBORD = re.compile(
 #: how far in front of the pronoun an adverbial phrase may run
 LEAD_WINDOW = 40
 _IRREGULAR = {"have": "has", "do": "does", "go": "goes", "be": "is"}
+#: relation nouns that name a slot, so "my sister Iris" lands on `sibling`
+_RELATIONS = {
+    "sister": "sibling",
+    "brother": "sibling",
+    "sibling": "sibling",
+    "mother": "parent",
+    "father": "parent",
+    "mum": "parent",
+    "dad": "parent",
+    "son": "child",
+    "daughter": "child",
+    "wife": "partner",
+    "husband": "partner",
+    "partner": "partner",
+    "manager": "manager",
+    "boss": "manager",
+}
 _PRONOUN_SUBJECTS = {"user", "i", "me", "my", "we"}
 _STOPCAPS = {"i", "my", "the", "a", "an", "and", "but", "so", "also", "ok", "okay", "yes", "no"}
 
@@ -315,6 +462,21 @@ def _match(line: str, turn: Turn, principal: str) -> ExtractedFact | None:
     match = _PAT_MY.match(line)
     if match:
         noun, value = _clip(match.group(1)), _clip(match.group(2))
+        words = noun.split()
+        relation = _RELATIONS.get(words[0].lower()) if words else None
+        if relation and len(words) > 1:
+            # "my sister Iris is up in Porto" - the durable claim is who the
+            # sister is; where she is that week is a fact about her, not about
+            # the principal, and this extractor has no way to attribute it
+            name = " ".join(words[1:])
+            return _make(
+                f"{principal.capitalize()}'s {words[0].lower()} is {name}.",
+                principal,
+                relation,
+                name,
+                line,
+                turn,
+            )
         if not _usable(value):
             return None
         return _make(
@@ -362,7 +524,8 @@ def _match(line: str, turn: Turn, principal: str) -> ExtractedFact | None:
         return _make(
             f"{principal.capitalize()} is {prep} {value}.",
             principal,
-            f"is_{prep}",
+            # "I'm in Lisbon" is where they live; "at" and "from" are not that
+            "lives_in" if prep == "in" else f"is_{prep}",
             value,
             line,
             turn,
@@ -396,6 +559,20 @@ def _match(line: str, turn: Turn, principal: str) -> ExtractedFact | None:
             turn,
         )
 
+    match = _PAT_ALLERGIC.match(line)
+    if match:
+        value = _clip(match.group(1))
+        if not _usable(value):
+            return None
+        return _make(
+            f"{principal.capitalize()} is allergic to {value}.",
+            principal,
+            "allergy",
+            value,
+            line,
+            turn,
+        )
+
     match = _PAT_IS.match(line)
     if match:
         value = _clip(match.group(1))
@@ -417,9 +594,9 @@ def _make(
     return ExtractedFact(
         text=text,
         subject=_norm(subject),
-        predicate=_snake(predicate),
+        predicate=canonical_predicate(predicate),
         object=_norm(obj),
-        entities=_entities(_capitalised(source), _norm(subject)),
+        entities=_entities(_capitalised(source), _norm(subject), subject),
         turn_idx=turn.idx,
         valid_from=turn.ts,
         valid_to=OPEN_INTERVAL,
@@ -451,7 +628,11 @@ def _clip(value: str) -> str:
     left, sep, right = head.partition(", ")
     # a comma joining two substantial phrases is joining two clauses; a short one
     # ("Lisbon, Alfama", "flat white, no sugar") is part of the same value
-    if sep and len(left.split()) >= 3 and len(right.split()) >= 3:
+    tail = right.split()
+    if sep and (
+        (len(left.split()) >= 3 and len(tail) >= 3)
+        or (len(tail) == 1 and right.lower().endswith("ly"))  # "shellfish, badly"
+    ):
         head = left.strip()
     for _ in range(2):  # "the MacBook Pro now" and "a sesame allergy as well"
         head = _TRAIL.sub("", head).strip()

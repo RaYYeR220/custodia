@@ -709,8 +709,14 @@ def _load_beam(source: Source) -> list[Instance]:
 #: the dataset has, if it has fewer). Abstention is the headline claim, and a
 #: strictly proportional sample of 50 questions from LongMemEval-S would contain
 #: three of them -- a denominator too small for the resulting rate to mean
-#: anything. Whether the floor was applied is reported in ``dataset_stats``.
+#: anything.
 DEFAULT_MIN_ABSTENTION = 8
+
+#: ...but the floor is itself capped at this share of the sample, so a small
+#: ``--limit`` cannot turn into a mostly-abstention run. Without the cap a
+#: 12-question smoke test would be two-thirds unanswerable, and its overall
+#: accuracy would describe a benchmark nobody published.
+MAX_ABSTENTION_SHARE = 0.25
 
 
 def _largest_remainder(weights: dict[str, int], total: int) -> dict[str, int]:
@@ -763,9 +769,10 @@ def sample_instances(
       identical -- candidates are sorted by qid before any random draw, so the
       order the file happened to be written in cannot leak into the sample;
     * abstention questions are never sampled away. They are allocated first, at
-      their true share of the dataset but never below ``min_abstention``, and the
-      remaining slots are distributed proportionally across the other question
-      types by largest remainder.
+      their true share of the dataset but never below ``min_abstention`` and
+      never above :data:`MAX_ABSTENTION_SHARE` of the sample, and the remaining
+      slots are distributed proportionally across the other question types by
+      largest remainder.
     """
     pool = [i for i in instances if not types or i.qtype in set(types)]
     pool.sort(key=lambda i: i.qid)
@@ -780,7 +787,8 @@ def sample_instances(
         return sorted(rng.sample(pool, limit), key=lambda i: i.qid)
 
     share = len(abstention) / len(pool) if pool else 0.0
-    want_abs = max(min(len(abstention), min_abstention), int(round(limit * share)))
+    floor = min(min_abstention, max(1, int(limit * MAX_ABSTENTION_SHARE)))
+    want_abs = max(floor, int(round(limit * share)))
     n_abs = min(len(abstention), want_abs, limit)
     picked: list[Instance] = rng.sample(abstention, n_abs) if n_abs else []
 
@@ -896,9 +904,10 @@ def dataset_stats(instances: Iterable[Instance]) -> dict[str, Any]:
             "share": round(len(abstention) / len(items), 4),
             "by_type": dict(sorted(Counter(i.qtype for i in abstention).items())),
             "note": (
-                "in a sampled run this share may exceed the source dataset's share, "
-                f"because sampling enforces a floor of {DEFAULT_MIN_ABSTENTION} abstention "
-                "questions so the abstention rates have a usable denominator"
+                "in a sampled run this share may exceed the source dataset's share: "
+                f"sampling enforces a floor of {DEFAULT_MIN_ABSTENTION} abstention questions "
+                "so the abstention rates have a usable denominator, itself capped at "
+                f"{MAX_ABSTENTION_SHARE:.0%} of the sample so a small run is not dominated by them"
             ),
         },
         "sessions": {

@@ -36,6 +36,7 @@ __all__ = [
     "FullContextBaseline",
     "VectorlessRagBaseline",
     "Bm25Index",
+    "ABSTENTION_TOKEN",
 ]
 
 
@@ -66,10 +67,19 @@ class Baseline:
         return {"system": self.name}
 
 
+#: Custodia signals abstention structurally, through its gate's ``answered``
+#: flag. A baseline has no such channel, so it is given an explicit token to emit
+#: instead. Without it the baselines would be scored on whether a phrase-matcher
+#: happened to recognise their wording, and would be marked down for saying "the
+#: material does not contain that" in an unanticipated way. Handing them a
+#: canonical form is what makes the abstention comparison symmetric rather than
+#: an artefact of the scorer.
+ABSTENTION_TOKEN = "INSUFFICIENT EVIDENCE"
+
 _SYSTEM_PROMPT = (
     "You answer questions about a user from their past conversations with you. "
     "Answer only from the material given. If the material does not contain the "
-    "answer, say so plainly and do not guess."
+    f"answer, begin your reply with {ABSTENTION_TOKEN} and do not guess."
 )
 
 _QUESTION_TEMPLATE = """\
@@ -79,8 +89,9 @@ _QUESTION_TEMPLATE = """\
 Today is {question_date}.
 Question: {question}
 
-Answer in one or two sentences. If the material above does not contain the
-answer, reply that the information is not available.
+Answer in one or two sentences, using only the material above.
+If the material does not contain the answer, reply with exactly
+"{token}" followed by one sentence saying what is missing. Do not guess.
 """
 
 
@@ -155,6 +166,7 @@ class FullContextBaseline(Baseline):
             material=material,
             question_date=instance.question_date,
             question=instance.question,
+            token=ABSTENTION_TOKEN,
         )
         return prompt, notes
 
@@ -248,19 +260,38 @@ class Bm25Index:
         return [(i, scores[i]) for i in ranked[:k] if scores[i] > 0]
 
 
-def _custodia_index() -> Any | None:
-    """Use ``custodia.lexical.LexicalIndex`` if it exposes ``add``/``search``."""
+def _custodia_index(corpus: str = "eval-rag") -> tuple[Any, bool] | None:
+    """Bind ``custodia.lexical.LexicalIndex`` if it is usable.
+
+    Returns the index and whether its ``add`` takes the document id first --
+    Custodia's does (``add(fid, text)``), a plain text-first index does not.
+    The order is read off the signature rather than assumed, because calling it
+    the wrong way round indexes the id as the document and quietly produces a
+    retriever that returns nothing.
+    """
     try:
         from custodia.lexical import LexicalIndex  # noqa: PLC0415 - lazy on purpose
     except Exception:
         return None
     try:
-        index = LexicalIndex()
+        index = LexicalIndex(corpus=corpus)
+    except TypeError:
+        try:
+            index = LexicalIndex()
+        except Exception:
+            return None
     except Exception:
         return None
-    if callable(getattr(index, "add", None)) and callable(getattr(index, "search", None)):
-        return index
-    return None
+    add = getattr(index, "add", None)
+    if not callable(add) or not callable(getattr(index, "search", None)):
+        return None
+    import inspect
+
+    try:
+        first = next(iter(inspect.signature(add).parameters))
+    except (TypeError, ValueError, StopIteration):
+        return None
+    return index, first in {"fid", "id", "doc_id", "docid"}
 
 
 # --------------------------------------------------------------------------- #
@@ -332,19 +363,23 @@ class VectorlessRagBaseline(Baseline):
         chunks = self.chunks(instance)
         if not chunks:
             return []
-        index = _custodia_index() if self.prefer_custodia_index else None
-        if index is not None:
+        bound = _custodia_index() if self.prefer_custodia_index else None
+        if bound is not None:
+            index, id_first = bound
             self.index_impl = "custodia.lexical"
             try:
                 for position, chunk in enumerate(chunks):
-                    index.add(chunk["text"], {"i": position})
+                    if id_first:
+                        index.add(position, chunk["text"])
+                    else:
+                        index.add(chunk["text"])
                 hits = index.search(instance.question, self.top_k)
                 picked = [_hit_position(hit, chunks) for hit in hits]
                 return [chunks[i] for i in picked if 0 <= i < len(chunks)][: self.top_k]
-            except Exception:
+            except Exception as exc:
                 # a mid-change index must not silently degrade the baseline's
                 # retrieval quality without the report saying so
-                self.index_impl = "eval-local-bm25 (custodia.lexical raised)"
+                self.index_impl = f"eval-local-bm25 (custodia.lexical raised {type(exc).__name__})"
         else:
             self.index_impl = "eval-local-bm25"
         local = Bm25Index()
@@ -359,6 +394,7 @@ class VectorlessRagBaseline(Baseline):
             material=material or "(nothing retrieved)",
             question_date=instance.question_date,
             question=instance.question,
+            token=ABSTENTION_TOKEN,
         )
         started = time.perf_counter()
         text = self.llm.complete(

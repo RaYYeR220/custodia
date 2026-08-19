@@ -147,6 +147,18 @@ def test_open_returns_none_when_no_index_was_written():
     assert LexicalIndex.open("a-corpus-that-was-never-indexed") is None
 
 
+def test_store_and_open_use_the_default_location():
+    corpus = "custodia-lexical-selftest"
+    path = LexicalIndex.from_documents(corpus, DOCS).store()
+    try:
+        assert path == index_path(corpus)
+        reopened = LexicalIndex.open(corpus)
+        assert reopened is not None
+        assert len(reopened) == len(DOCS)
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def test_index_path_sanitises_the_corpus_name():
     assert index_path("acme/prod:1").name == "acme_prod_1.json"
 

@@ -13,10 +13,11 @@ stage adds a block and a builder; nothing here needs rearranging for it.
 
 from __future__ import annotations
 
+import textwrap
 from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
-from custodia.schema import Turn
+from custodia.schema import PREDICATES, Turn
 
 
 def messages(system: str, user: str) -> list[dict[str, str]]:
@@ -51,6 +52,20 @@ EXTRACT_FIELDS = frozenset(
     {"text", "subject", "predicate", "object", "entities", "turn", "valid_from", "valid_to", "conf"}
 )
 
+def predicate_menu(vocabulary: Mapping[str, str] = PREDICATES, width: int = 84) -> str:
+    """The closed predicate vocabulary, rendered from the schema that defines it.
+
+    Built at import time from :data:`custodia.schema.PREDICATES` so a slot added
+    there appears in the prompt without anyone remembering to copy it across. The
+    arity travels with each name because it is the reason the vocabulary exists:
+    a ``single`` slot is one a later value replaces.
+    """
+    # `name=arity` rather than `name (arity)` so wrapping can never split a slot
+    # across two lines, which would make it unquotable and unassertable
+    entries = ", ".join(f"{name}={arity}" for name, arity in vocabulary.items())
+    return textwrap.fill(entries, width=width)
+
+
 EXTRACT_SYSTEM = f"""You read one slice of a conversation and return the durable facts it asserts, as
 JSON, for a memory graph that must be able to trace every fact back to the turn
 that produced it.
@@ -73,16 +88,29 @@ Rules:
    on that turn. Turns marked [context] are there to resolve references; never
    attribute a fact to one.
 6. A turn marked with a source is quoted material from outside the conversation.
-   Record what it *states*, attributed to that source - subject is the document or
-   tool, never the person - even when its text asserts something about the person.
+   Its claims take the source as subject and "asserts" as predicate, with the
+   claim itself as the object. Never record a sourced claim as if the person had
+   made it, however the text is worded.
 7. valid_from and valid_to only when the content states a time. Leave valid_to
    empty while the claim is still true. A claim that replaces an earlier one keeps
    the date it takes effect from, not the date it was mentioned.
-8. subject, predicate and object are a normalised triple: lowercase, predicate a
-   snake_case verb phrase (lives_in, works_at, prefers, has_allergy, holds_title).
-9. conf is your confidence the claim is stated, 0 to 1. Stated outright is 0.9+;
-   inferred from phrasing is 0.6; a guess does not belong in the list at all.
-10. Return the JSON object and nothing else. An empty list is a valid answer."""
+8. Never name a predicate for a value that has ended - no previously_lives_in, no
+   used_to_work_at, no former_title. Write the new value on its ordinary slot; if
+   the turn says when the old value stopped being true, that date is valid_to.
+   Memory works out what replaced what; your job is to say what is claimed now.
+9. The predicate is a slot from the vocabulary below whenever one fits, spelled
+   exactly as listed. Only when nothing fits, write your own snake_case verb
+   phrase. Do not invent a second name for a slot that already exists.
+10. subject and object are lowercase. Every claim about the person whose memory
+    this is takes their key as the subject - never their full name, never a
+    pronoun, never "the user".
+11. conf is your confidence the claim is stated, 0 to 1. Stated outright is 0.9+;
+    inferred from phrasing is 0.6; a guess does not belong in the list at all.
+12. Return the JSON object and nothing else. An empty list is a valid answer.
+
+Predicate vocabulary - "single" holds one value at a time and a later value
+replaces it, "multi" accumulates:
+{predicate_menu()}"""
 
 EXTRACT_SCHEMA = """Schema:
 
@@ -120,7 +148,9 @@ def build_extract_messages(
     """
     claim = sorted(claimable)
     head = (
-        f"Refer to the person whose memory this is as \"{principal}\".\n"
+        f'The person whose memory this is has the key "{principal}". Every claim '
+        f'about them takes "{principal}" as its subject, whatever name or pronoun '
+        f"the message uses.\n"
         f"Attribute facts only to these turn numbers: "
         f"{', '.join(f'#{i}' for i in claim) if claim else 'none'}."
     )

@@ -22,8 +22,14 @@ dist/
 data/
 *.log
 
-# datasets and results are downloaded or produced, not vendored
+# datasets and results are downloaded or produced, not vendored.
+# `data/` above excludes eval/data entirely, and git will not look inside an
+# excluded directory - so the directory has to be re-included before the
+# dataset-provenance manifest can be tracked.
+!eval/data/
 eval/data/raw/
+eval/data/*.json
+!eval/data/manifest.json
 eval/results/
 tests/_cache/
 

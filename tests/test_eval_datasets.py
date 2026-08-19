@@ -185,8 +185,19 @@ def test_abstention_floor_is_respected_when_the_sample_allows_it(
     raw_records: list[dict],
 ) -> None:
     instances = normalize_longmemeval(raw_records)
-    picked = sample_instances(instances, limit=20, seed=0, min_abstention=6)
+    picked = sample_instances(instances, limit=24, seed=0, min_abstention=6)
     assert sum(1 for i in picked if i.is_abstention) == 6
+
+
+def test_the_floor_never_lets_abstention_dominate_a_small_sample(
+    raw_records: list[dict],
+) -> None:
+    """A 12-question smoke test must not silently become a 67% abstention run."""
+    instances = normalize_longmemeval(raw_records)
+    for limit in (4, 8, 12, 20, 30):
+        picked = sample_instances(instances, limit=limit, seed=0)
+        share = sum(1 for i in picked if i.is_abstention) / len(picked)
+        assert 0 < share <= 0.35, f"abstention share {share:.2f} at limit={limit}"
 
 
 def test_stratification_covers_every_question_type(raw_records: list[dict]) -> None:

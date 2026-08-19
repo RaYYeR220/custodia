@@ -13,13 +13,12 @@ racing another run for the path budget while it does.
 
 from __future__ import annotations
 
-import time
 import uuid
 
 import pytest
 
 from custodia import config, ids, schema
-from custodia.hydra.client import HydraClient
+from custodia.hydra.client import HydraClient, HydraError
 from custodia.lexical import LexicalIndex
 from custodia.retrieve import Retriever
 from custodia.schema import Tier
@@ -76,6 +75,13 @@ FACTS = [
 LABELS = (schema.FACT, schema.ENTITY, schema.TURN, schema.SESSION, schema.CORPUS,
           schema.QUERY, schema.ANSWER, schema.REJECTION)
 
+# Questions carry both the plain word and the namespaced entity key: the first is
+# what the index matches against the fact text, the second is what resolves to an
+# `Entity.norm` in this run's corpus. A question with only the namespaced key
+# would exercise the traversal and nothing else.
+GYM_QUESTION = f"which gym does the user use, {GYM}"
+GYM_QUESTION_PAST = f"which gym did the user use, {GYM}"
+
 
 def fid(key: str) -> int:
     return ids.fact_id(CORPUS, key)
@@ -93,8 +99,18 @@ F_MEMBERSHIP = fid("membership|is|active")
 
 
 def wipe(client: HydraClient, corpus: str) -> None:
+    """Best-effort cleanup.
+
+    The instance is shared, so a delete can lose a race with someone else's
+    load and time out. Corpus names carry a per-run suffix, which means a
+    failed wipe leaves litter rather than breaking the next run - and a test
+    that reports red because teardown was slow reports nothing useful.
+    """
     for label in LABELS:
-        client.run(f"MATCH (n:{label}) WHERE n.corpus = $c DETACH DELETE n", c=corpus)
+        try:
+            client.run(f"MATCH (n:{label} {{corpus: $c}}) DETACH DELETE n", c=corpus)
+        except HydraError:
+            pass
 
 
 def seed(client: HydraClient) -> None:
@@ -302,7 +318,7 @@ def test_the_index_covers_every_fact_in_the_corpus(index: LexicalIndex):
 
 
 def test_entity_seeded_expansion_finds_the_answer_bearing_fact(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
 
     assert warrant.paths_examined > 0
     assert F_NORTHLINE in warrant.ids()
@@ -310,7 +326,7 @@ def test_entity_seeded_expansion_finds_the_answer_bearing_fact(retriever: Retrie
 
 
 def test_evidence_carries_the_chain_that_reached_it(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
     found = next(e for e in warrant.evidence if e.fid == F_NORTHLINE)
 
     assert found.path[0].startswith("Entity:")
@@ -322,7 +338,7 @@ def test_evidence_carries_the_chain_that_reached_it(retriever: Retriever):
 def test_a_fact_reached_only_by_traversal_reports_its_distance(client, settings):
     """With no index there is no lexical shortcut, so hops is the graph distance."""
     warrant = Retriever(client, CORPUS, settings=settings).warrant(
-        f"which {GYM} does the user use"
+        GYM_QUESTION
     )
     found = next(e for e in warrant.evidence if e.fid == F_NORTHLINE)
     assert found.hops >= 1
@@ -330,7 +346,7 @@ def test_a_fact_reached_only_by_traversal_reports_its_distance(client, settings)
 
 
 def test_provenance_is_attached_from_the_originating_turn(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
     found = next(e for e in warrant.evidence if e.fid == F_NORTHLINE)
 
     assert found.turn_text == "I switched over to Northline Fitness this month."
@@ -348,7 +364,7 @@ def test_a_question_matching_nothing_returns_an_empty_warrant(retriever: Retriev
 
 
 def test_a_quarantined_fact_never_reaches_the_warrant_but_is_counted(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
 
     assert F_ATTACK not in warrant.ids()
     assert "Payload" not in " ".join(e.text for e in warrant.evidence)
@@ -356,7 +372,7 @@ def test_a_quarantined_fact_never_reaches_the_warrant_but_is_counted(retriever: 
 
 
 def test_an_external_tier_fact_is_refused_even_when_it_is_active(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
 
     assert F_EXTERNAL not in warrant.ids()
     assert "Rival" not in " ".join(e.text for e in warrant.evidence)
@@ -366,7 +382,7 @@ def test_lowering_the_tier_floor_admits_external_evidence(client, index, setting
     permissive = Retriever(
         client, CORPUS, index=index, settings=settings, min_tier=Tier.EXTERNAL
     )
-    warrant = permissive.warrant(f"which {GYM} does the user use")
+    warrant = permissive.warrant(GYM_QUESTION)
 
     assert F_EXTERNAL in warrant.ids()
     assert F_ATTACK not in warrant.ids()  # quarantine is not a tier question
@@ -376,7 +392,7 @@ def test_retrieval_does_not_cross_a_corpus_boundary(client, index, settings):
     stranger = seed_neighbour(client)
     try:
         warrant = Retriever(client, CORPUS, index=index, settings=settings).warrant(
-            f"which {GYM} does the user use"
+            GYM_QUESTION
         )
         assert stranger not in warrant.ids()
         assert "Elsewhere" not in " ".join(e.text for e in warrant.evidence)
@@ -388,7 +404,7 @@ def test_retrieval_does_not_cross_a_corpus_boundary(client, index, settings):
 
 
 def test_a_superseded_fact_is_replaced_by_its_head(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
 
     assert F_NORTHLINE in warrant.ids()
     assert F_IRONWORKS not in warrant.ids()
@@ -396,7 +412,7 @@ def test_a_superseded_fact_is_replaced_by_its_head(retriever: Retriever):
 
 
 def test_as_of_returns_the_value_that_was_true_then(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} did the user use", as_of=T2)
+    warrant = retriever.warrant(GYM_QUESTION_PAST, as_of=T2)
 
     assert F_IRONWORKS in warrant.ids()
     assert F_NORTHLINE not in warrant.ids()
@@ -406,13 +422,13 @@ def test_as_of_returns_the_value_that_was_true_then(retriever: Retriever):
 
 
 def test_as_of_after_the_switch_returns_the_current_value(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} did the user use", as_of=T4)
+    warrant = retriever.warrant(GYM_QUESTION_PAST, as_of=T4)
     assert F_NORTHLINE in warrant.ids()
     assert F_IRONWORKS not in warrant.ids()
 
 
 def test_as_of_before_the_lineage_existed_returns_neither(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} did the user use", as_of=T5)
+    warrant = retriever.warrant(GYM_QUESTION_PAST, as_of=T5)
     assert F_IRONWORKS not in warrant.ids()
     assert F_NORTHLINE not in warrant.ids()
 
@@ -421,12 +437,12 @@ def test_as_of_before_the_lineage_existed_returns_neither(retriever: Retriever):
 
 
 def test_ranking_puts_the_answer_bearing_fact_near_the_top(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
     assert F_NORTHLINE in [e.fid for e in warrant.evidence[:3]]
 
 
 def test_scores_are_ordered_and_bounded(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
     scores = [e.score for e in warrant.evidence]
 
     assert scores == sorted(scores, reverse=True)
@@ -437,9 +453,31 @@ def test_scores_are_ordered_and_bounded(retriever: Retriever):
 def test_corroborated_evidence_outranks_an_equivalent_uncorroborated_fact(
     retriever: Retriever,
 ):
-    warrant = retriever.warrant(f"which {GYM} does the user use")
+    warrant = retriever.warrant(GYM_QUESTION)
     by_id = {e.fid: e for e in warrant.evidence}
     assert by_id[F_NORTHLINE].score > by_id[fid("dog|is|pip")].score
+
+
+@pytest.mark.parametrize(
+    "question, expected_key",
+    [
+        ("what does the user drink", "drink|is|oatmilk"),
+        ("what is the user's dog called", "dog|is|pip"),
+        ("how does the user commute", "commute|is|tram"),
+        ("what phone does the user carry", "phone|is|pixel"),
+    ],
+)
+def test_the_question_decides_the_order_not_just_the_anchor(
+    retriever: Retriever, question, expected_key
+):
+    """Every fact in this corpus hangs off `user`, so the anchor cannot order them.
+
+    A regression guard on the ranking blend: with graph anchoring as the only
+    strong term, all four of these questions return the same list in the same
+    order, which is the failure mode the lexical term exists to prevent.
+    """
+    warrant = retriever.warrant(question)
+    assert warrant.evidence[0].fid == fid(expected_key)
 
 
 def test_k_bounds_the_warrant(retriever: Retriever):
@@ -464,7 +502,7 @@ def test_without_an_index_that_fact_is_unreachable(client, settings):
 
 
 def test_lexical_and_entity_routes_merge_into_one_piece_of_evidence(retriever: Retriever):
-    warrant = retriever.warrant(f"which {GYM} is Northline Fitness")
+    warrant = retriever.warrant(f"which gym is Northline Fitness, {GYM}")
     matches = [e for e in warrant.evidence if e.fid == F_NORTHLINE]
     assert len(matches) == 1
 
@@ -475,13 +513,22 @@ def test_lexical_and_entity_routes_merge_into_one_piece_of_evidence(retriever: R
 def test_warrant_serialises(retriever: Retriever):
     import json
 
-    payload = json.loads(json.dumps(retriever.warrant(f"which {GYM}").as_dict()))
-    assert payload["question"] == f"which {GYM}"
+    payload = json.loads(json.dumps(retriever.warrant(GYM_QUESTION).as_dict()))
+    assert payload["question"] == GYM_QUESTION
     assert payload["seeds"]["entities"]
     assert isinstance(payload["evidence"], list)
 
 
-def test_a_warrant_comes_back_inside_a_second(retriever: Retriever):
-    started = time.perf_counter()
-    retriever.warrant(f"which {GYM} does the user use")
-    assert (time.perf_counter() - started) < 1.0
+def test_a_warrant_costs_a_bounded_number_of_round_trips(retriever: Retriever):
+    """The pipeline is O(1) statements in the size of the corpus, not O(n).
+
+    Asserting the count rather than the clock is what makes this meaningful on
+    a shared instance: wall time measures whoever else is using the box, while
+    the number of statements measures the design.
+    """
+    retriever.warrant(GYM_QUESTION)  # warm the seed lookups
+    before = retriever.client.stats["queries"]
+    warrant = retriever.warrant(GYM_QUESTION)
+
+    assert warrant.evidence
+    assert retriever.client.stats["queries"] - before <= 10

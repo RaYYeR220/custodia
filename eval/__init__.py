@@ -330,6 +330,26 @@ def resolve_llm(model: str | None = None, *, role: str = "answer") -> LlmBinding
     return LlmBinding(client=client, model=chosen, origin="eval-builtin")
 
 
+def _takes_messages(fn: Callable[..., Any]) -> bool:
+    """Whether a callable's first parameter is a message list rather than a prompt.
+
+    Checked rather than assumed: calling a ``chat(messages, ...)`` client with a
+    bare string produces a malformed request that some providers answer anyway,
+    which is exactly the kind of quiet degradation this harness must not have.
+    """
+    import inspect
+
+    try:
+        parameters = [
+            p
+            for p in inspect.signature(fn).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+    except (TypeError, ValueError):
+        return False
+    return bool(parameters) and parameters[0].name in {"messages", "msgs", "chat"}
+
+
 def _bind_custodia(model: str) -> LlmBinding | None:
     """Find a usable entry point on ``custodia.llm``; ``None`` if there is none."""
     try:
@@ -337,20 +357,25 @@ def _bind_custodia(model: str) -> LlmBinding | None:
     except Exception:
         return None
 
-    for name in ("LlmClient", "LLM", "Client", "ChatClient"):
+    for name in ("LLM", "LlmClient", "Client", "ChatClient"):
         factory = getattr(module, name, None)
         if not callable(factory):
             continue
         try:
-            instance = factory(model=model)
+            instance = factory()
         except TypeError:
             try:
-                instance = factory()
+                instance = factory(model=model)
             except Exception:
                 continue
         except Exception:
             continue
-        method = getattr(instance, "complete", None) or getattr(instance, "chat", None)
+        chat = getattr(instance, "chat", None)
+        if callable(chat) and _takes_messages(chat):
+            return LlmBinding(
+                client=_MessagesClient(chat, model), model=model, origin="custodia.llm"
+            )
+        method = getattr(instance, "complete", None) or chat
         if callable(method):
             return LlmBinding(
                 client=_BoundCallable(method, model), model=model, origin="custodia.llm"
@@ -359,7 +384,8 @@ def _bind_custodia(model: str) -> LlmBinding | None:
     for name in ("complete", "chat", "chat_completion"):
         fn = getattr(module, name, None)
         if callable(fn):
-            return LlmBinding(
-                client=_BoundCallable(fn, model), model=model, origin="custodia.llm"
+            client: ChatLLM = (
+                _MessagesClient(fn, model) if _takes_messages(fn) else _BoundCallable(fn, model)
             )
+            return LlmBinding(client=client, model=model, origin="custodia.llm")
     return None

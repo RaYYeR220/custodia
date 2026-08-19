@@ -143,7 +143,9 @@ class LexicalIndex:
         is silently unindexed is an attack nobody can show a judge.
         """
         rows = client.run(
-            f"MATCH (f:{schema.FACT}) WHERE f.corpus = $corpus "
+            # the equality goes in the pattern, not in a WHERE: HydraDB uses the
+            # vertex index for the first and scans for the second
+            f"MATCH (f:{schema.FACT} {{corpus: $corpus}}) "
             "RETURN f.id AS id, f.text AS text, f.subj AS subj, f.pred AS pred, f.obj AS obj",
             corpus=corpus,
         )
@@ -253,6 +255,12 @@ class LexicalIndex:
             k1=float(payload.get("k1", K1)),
             b=float(payload.get("b", B)),
         )
+
+    def store(self) -> Path:
+        """Save to the corpus' default location and return where it went."""
+        path = index_path(self.corpus)
+        self.save(path)
+        return path
 
     @classmethod
     def open(cls, corpus: str) -> "LexicalIndex | None":

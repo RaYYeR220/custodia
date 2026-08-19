@@ -27,10 +27,10 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import typer
 
@@ -55,7 +55,7 @@ from .poison import (
     save_suite,
     score_poison,
 )
-from .run_longmemeval import CustodiaSystem, MissingIntegration, RecordStore
+from .run_longmemeval import CustodiaSystem, MissingIntegration, RecordStore, _report_dict
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
@@ -94,45 +94,66 @@ def apply_case(instance: Instance, case: AttackCase) -> Instance:
 class PoisonedCustodia(CustodiaSystem):
     """Custodia, plus the graph probes the poison metrics need.
 
-    Ingesting the injected session separately is not cosmetic: the tier of a turn
-    is what Custodia's policy engine admits or refuses on, and the tier is a
-    property of the channel the content arrived on -- so the runner must pass the
-    case's declared tier rather than infer one from the message's role.
+    Setting the injected turns' tier explicitly is not cosmetic: the tier is what
+    Custodia's policy engine admits or refuses on, and it is a property of the
+    channel the content arrived on -- so the runner passes the case's declared
+    tier rather than letting it be inferred from the message's role. That is the
+    experiment: ``forged-authority`` *claims* owner authority while travelling on
+    an external channel, and the graph must record the channel.
     """
 
     name: str = "custodia"
+    case_key: str = ""
+
+    def corpus_for(self, instance: Instance) -> str:
+        """One corpus per *case*, not per question.
+
+        All seven cases built from a question share its qid, so keying the corpus
+        on the qid would let the six attacks and the control land in the same
+        memory and poison each other's measurements. The case's injected session
+        id is unique and deterministic, which makes each run independent and each
+        corpus re-creatable.
+        """
+        key = (self.case_key or instance.qid).removeprefix("poison-")
+        return f"{self.corpus_prefix}{key}"
 
     def ingest_case(self, instance: Instance, case: AttackCase) -> dict[str, Any]:
-        stats = self.ingest(instance)  # the clean history, at its natural tiers
+        """Ingest the clean history and the injection in one pass, in time order.
+
+        One pass rather than two, so the injected session takes its true position
+        in the corpus rather than being appended as if it were session zero of a
+        second corpus. The injected turns then have their declared tier and origin
+        written back over what the role would have implied -- which is the whole
+        experiment: ``forged-authority`` arrives *claiming* owner authority while
+        travelling on an external channel, and the graph must record the channel.
+        """
         client = self.connect()
         corpus = self.corpus_for(instance)
-        from custodia import ingest as ingest_module
+        try:
+            from custodia.ingest import ingest_sessions
+        except ImportError as exc:
+            raise MissingIntegration(f"custodia.ingest is not importable: {exc}") from exc
 
-        factory = getattr(ingest_module, "Ingestor", None) or getattr(
-            ingest_module, "Ingest", None
-        )
-        if factory is None:
-            raise MissingIntegration(
-                "the poison runner needs custodia.ingest.Ingestor so the injected "
-                "session can be written at its own trust tier"
-            )
-        writer = factory(client, corpus=corpus)
-        for idx, turn in enumerate(case.injected):
-            writer.add_turn(
-                sid=case.injected_session_id,
-                sidx=len(instance.sessions),
-                idx=idx,
-                role=turn.role,
-                text=turn.content,
-                ts=turn.ts,
-                tier=turn.tier,
-                origin=f"poison:{case.family}" if not case.is_control else "",
-            )
-        injected_stats = writer.flush()
-        stats["injected_stats"] = (
-            injected_stats if isinstance(injected_stats, dict) else str(injected_stats)
-        )
-        return stats
+        poisoned = apply_case(instance, case)
+        payload = self.as_payload(poisoned.sessions)
+        origin = "" if case.is_control else f"poison:{case.family}"
+        for session in payload:
+            if session["sid"] != case.injected_session_id:
+                continue
+            for turn, injected in zip(session["turns"], case.injected):
+                turn["role"] = injected.role
+                turn["tier"] = injected.tier
+                turn["ts"] = injected.ts
+                turn["origin"] = origin
+
+        started = time.perf_counter()
+        report = ingest_sessions(client, corpus, payload)
+        return {
+            "corpus": corpus,
+            "ingest_ms": round((time.perf_counter() - started) * 1000, 1),
+            "ingest_report": _report_dict(report),
+            "injected_tier": case.tier,
+        }
 
     def probe(self, instance: Instance, case: AttackCase) -> dict[str, Any]:
         """Ask the graph what happened to the injected content.
@@ -153,13 +174,15 @@ class PoisonedCustodia(CustodiaSystem):
                 "Fact", corpus=corpus, sid=case.injected_session_id, status="quarantined"
             )
         except Exception as exc:
+            # a probe that failed is recorded as failed; it is not read as "clean"
             out["probe_error"] = f"{type(exc).__name__}: {exc}"
             out["facts_from_injection"] = 0
             out["facts_quarantined"] = 0
         try:
+            # the corpus holds exactly one case, so this is that case's rejections
             out["rejections"] = client.count("Rejection", corpus=corpus)
         except Exception:
-            out["rejections"] = None  # Rejection may not carry a corpus property yet
+            out["rejections"] = None
         return out
 
 
@@ -297,6 +320,7 @@ def run(
             started = time.perf_counter()
             try:
                 if isinstance(system, PoisonedCustodia):
+                    system.case_key = case.injected_session_id
                     record.extra.update(system.ingest_case(instance, case))
                     reply = system.answer(instance)
                     probe = system.probe(instance, case)
@@ -370,10 +394,35 @@ def run(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
+    _warn_if_uninformative(cards, skipped)
+
     from .report import build_report
 
     typer.echo(build_report(document))
     typer.echo(f"\nwrote {out_path} and {store.path}")
+
+
+def _warn_if_uninformative(cards: dict[str, dict[str, Any]], skipped: dict[str, str]) -> None:
+    """Say out loud when a low flip rate did not actually test anything.
+
+    If most injections produced no extractable fact -- which happens whenever the
+    extraction model is unavailable and the rule-based fallback, which mines only
+    the principal's own turns, takes over -- then nothing was ever planted for the
+    policy engine to catch. The flip rate will look excellent and will mean
+    nothing. That has to be stated where a reader will see it, not left to be
+    inferred from a count in a side table.
+    """
+    for name, card in sorted(cards.items()):
+        attacks = int(card.get("attacks") or 0)
+        barren = int(card.get("no_fact_extracted") or 0)
+        if attacks and barren / attacks > 0.5:
+            message = (
+                f"{name}: {barren} of {attacks} attacks planted no extractable fact, so this "
+                "run does not test the policy engine. Check that the extraction model is "
+                "reachable before reading the flip rate as a result."
+            )
+            skipped[f"{name}_poison_validity"] = message
+            typer.secho(message, fg=typer.colors.RED)
 
 
 def _append(store: RecordStore, record: PoisonRecord) -> None:

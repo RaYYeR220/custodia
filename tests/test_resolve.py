@@ -12,11 +12,13 @@ from itertools import permutations
 
 import pytest
 
+from custodia import schema
 from custodia.policy import Policy
 from custodia.resolve import (
     MULTI_VALUED,
     Reconciliation,
     canonical_key,
+    fold_aliases,
     is_single_valued,
     normalize_entity,
     normalize_predicate,
@@ -120,19 +122,98 @@ def test_same_object_treats_a_token_subset_as_the_same_value() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# alias folding
+# --------------------------------------------------------------------------- #
+
+
+def test_a_full_name_folds_onto_the_short_one() -> None:
+    mapping = fold_aliases({"nora": "Nora", "nora salgado": "Nora Salgado", "marloe": "Marloe"})
+    assert mapping == {"nora salgado": "nora"}
+
+
+def test_ambiguity_folds_to_nothing() -> None:
+    """Merging two people is worse than leaving one person split."""
+    mapping = fold_aliases(
+        {"nora": "Nora", "nora salgado": "Nora Salgado", "nora costa": "Nora Costa"}
+    )
+    assert mapping == {}
+
+
+def test_a_trailing_region_qualifier_folds_onto_the_head() -> None:
+    mapping = fold_aliases({"alfama": "Alfama", "alfama lisbon": "Alfama, Lisbon"})
+    assert mapping == {"alfama lisbon": "alfama"}
+
+
+def test_a_noun_phrase_does_not_fold() -> None:
+    assert fold_aliases({"coffee": "coffee", "coffee shop": "coffee shop"}) == {}
+    assert fold_aliases({"gym": "the gym", "gym bag": "a gym bag"}) == {}
+
+
+def test_folding_needs_the_shorter_key_to_be_present() -> None:
+    assert fold_aliases({"nora salgado": "Nora Salgado", "marloe": "Marloe"}) == {}
+
+
+def test_explicit_aliases_win_and_resolve_chains() -> None:
+    mapping = fold_aliases({"nora": "Nora"}, aliases={"NS": "N Salgado", "N Salgado": "Nora"})
+    assert mapping == {"ns": "nora", "n salgado": "nora"}
+
+
+def test_alias_cycles_are_dropped_rather_than_looped() -> None:
+    assert fold_aliases([], aliases={"a": "b", "b": "a"}) == {}
+
+
+def test_folding_makes_two_spellings_reconcile() -> None:
+    early = make("Nora Salgado", "job_title", "product designer", vfrom=10, sidx=0)
+    later = make("Nora", "job_title", "design lead", vfrom=20, sidx=1)
+    mapping = fold_aliases({"nora": "Nora", "nora salgado": "Nora Salgado"})
+    assert mapping == {"nora salgado": "nora"}
+
+    early.subject = "Nora"
+    early.key = canonical_key(early.subject, early.predicate, early.object)
+    result = reconcile([early, later], policy=Policy())
+
+    assert pairs(result.supersedes) == [(later.key, early.key)]
+    assert early.status == SUPERSEDED
+
+
+# --------------------------------------------------------------------------- #
 # predicate arity
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
     "predicate",
-    ["is", "works_at", "lives_in", "prefers", "email", "preferred_airline", "current_gym"],
+    ["job_title", "lives_in", "usual_order", "email", "partner", "manager", "works_at"],
 )
-def test_single_valued_predicates(predicate: str) -> None:
+def test_vocabulary_single_valued_predicates(predicate: str) -> None:
+    assert predicate in schema.SINGLE_VALUED
     assert is_single_valued(predicate)
 
 
-@pytest.mark.parametrize("predicate", ["owns", "visited", "knows", "likes", "attended", ""])
+@pytest.mark.parametrize(
+    "predicate", ["allergy", "visited", "sibling", "preferred_food", "pet", "asserts"]
+)
+def test_vocabulary_multi_valued_predicates(predicate: str) -> None:
+    assert predicate in schema.PREDICATES
+    assert not is_single_valued(predicate)
+
+
+def test_the_shared_vocabulary_decides_before_any_local_heuristic() -> None:
+    """`preferred_food` matches the `preferred_*` fallback but the slot is multi."""
+    assert schema.PREDICATES["preferred_food"] == "multi"
+    assert not is_single_valued("preferred_food")
+    assert not is_single_valued("Preferred Food")
+
+
+@pytest.mark.parametrize(
+    "predicate", ["is", "prefers", "preferred_airline", "current_gym", "goes_to"]
+)
+def test_free_form_predicates_fall_back_to_the_local_patterns(predicate: str) -> None:
+    assert predicate not in schema.PREDICATES
+    assert is_single_valued(predicate)
+
+
+@pytest.mark.parametrize("predicate", ["owns", "knows", "likes", "attended", ""])
 def test_multi_valued_predicates(predicate: str) -> None:
     assert not is_single_valued(predicate)
 
@@ -313,6 +394,22 @@ def test_identical_triples_are_one_fact_and_never_self_corroborate() -> None:
     assert result.corroborates == []
     assert first.conf > 0.8                       # the repeat still counts
     assert first.valid_from == 10                 # but the claim started earlier
+
+
+def test_duplicate_merge_keeps_the_earlier_assertion_whatever_the_input_order() -> None:
+    def survivor(reverse: bool) -> Fact:
+        first = make("nora", "goes_to", "Ironworks", vfrom=10, sidx=0, sid="s0", conf=0.5)
+        repeat = make(
+            "nora", "goes_to", "Ironworks", vfrom=40, sidx=2, sid="s2",
+            conf=0.5, tier=Tier.ASSISTANT,
+        )
+        batch = [repeat, first] if reverse else [first, repeat]
+        reconcile(batch, policy=Policy())
+        return first
+
+    forwards, backwards = survivor(False), survivor(True)
+    assert (forwards.valid_from, forwards.conf) == (backwards.valid_from, backwards.conf)
+    assert forwards.valid_from == 10
 
 
 def test_corroboration_survives_a_later_supersession() -> None:

@@ -136,8 +136,8 @@ class Auditor:
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
         """Questions and what was said back, newest first, abstentions included."""
         rows = self.client.run(
-            f"MATCH (a:{schema.ANSWER})-[:{schema.ANSWERS}]->(q:{schema.QUERY}) "
-            "WHERE a.corpus = $corpus "
+            f"MATCH (a:{schema.ANSWER} {{corpus: $corpus}})"
+            f"-[:{schema.ANSWERS}]->(q:{schema.QUERY}) "
             "RETURN a.id AS answer_id, q.id AS query_id, q.text AS question, "
             "q.asof AS as_of, q.wsize AS warrant_size, q.quarantined AS quarantined, "
             "a.text AS answer, a.status AS status, a.reason AS reason, a.ts AS ts, "
@@ -147,30 +147,39 @@ class Auditor:
             corpus=self.corpus,
             limit=int(limit),
         )
+        # one read for every citation in the corpus, grouped here, rather than a
+        # lookup per row: statements are the expensive unit, not rows
+        cited = self._citations()
         out: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
             item["answered"] = item.get("status") == ANSWERED
             item["checks"] = [c for c in str(item.get("checks") or "").split(",") if c]
-            item["cited"] = self._citations(int(item["answer_id"]))
+            item["cited"] = cited.get(int(item["answer_id"]), [])
             out.append(item)
         return out
 
-    def _citations(self, answer_id: int) -> list[dict[str, Any]]:
-        return [
-            dict(row)
-            for row in self.client.run(
-                f"MATCH (a:{schema.ANSWER})-[:{schema.CITES}]->(f:{schema.FACT}) "
-                "WHERE a.id = $aid RETURN f.id AS fact_id, f.text AS text, "
-                "f.tier AS tier, f.status AS status",
-                aid=int(answer_id),
-            )
-        ]
+    def _citations(self) -> dict[int, list[dict[str, Any]]]:
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in self.client.run(
+            f"MATCH (a:{schema.ANSWER} {{corpus: $corpus}})"
+            f"-[:{schema.CITES}]->(f:{schema.FACT}) "
+            "RETURN a.id AS answer_id, f.id AS fact_id, f.text AS text, "
+            "f.tier AS tier, f.status AS status",
+            corpus=self.corpus,
+        ):
+            answer_id = row.get("answer_id")
+            if answer_id is None:
+                continue
+            entry = dict(row)
+            entry.pop("answer_id", None)
+            grouped.setdefault(int(answer_id), []).append(entry)
+        return grouped
 
     def explain(self, fact_id: int) -> dict[str, Any]:
         """A fact's full chain of custody: turn, session, and its lineage in time."""
         fact = self.client.run(
-            f"MATCH (f:{schema.FACT}) WHERE f.id = $fid "
+            f"MATCH (f:{schema.FACT} {{id: $fid}}) "
             "RETURN f.id AS fact_id, f.corpus AS corpus, f.key AS key, f.text AS text, "
             "f.subj AS subject, f.pred AS predicate, f.obj AS object, f.tier AS tier, "
             "f.status AS status, f.vfrom AS valid_from, f.vto AS valid_to, "
@@ -185,8 +194,9 @@ class Auditor:
         out["open_interval"] = int(out.get("valid_to") or 0) == schema.OPEN_INTERVAL
 
         chain = self.client.run(
-            f"MATCH (f:{schema.FACT})-[:{schema.DERIVED_FROM}]->(t:{schema.TURN})"
-            f"-[:{schema.IN_SESSION}]->(s:{schema.SESSION}) WHERE f.id = $fid "
+            f"MATCH (f:{schema.FACT} {{id: $fid}})"
+            f"-[:{schema.DERIVED_FROM}]->(t:{schema.TURN})"
+            f"-[:{schema.IN_SESSION}]->(s:{schema.SESSION}) "
             "RETURN t.id AS turn_id, t.text AS turn_text, t.role AS turn_role, "
             "t.ts AS turn_ts, t.idx AS turn_index, t.tier AS turn_tier, "
             "t.origin AS turn_origin, s.id AS session_id, s.sid AS session_name, "
@@ -198,8 +208,9 @@ class Auditor:
             # the fact is on the graph without the turn it came from, which is
             # the one shape the writer is supposed to make impossible
             turn = self.client.run(
-                f"MATCH (f:{schema.FACT})-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) "
-                "WHERE f.id = $fid RETURN t.id AS turn_id, t.text AS turn_text, "
+                f"MATCH (f:{schema.FACT} {{id: $fid}})"
+                f"-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) "
+                "RETURN t.id AS turn_id, t.text AS turn_text, "
                 "t.role AS turn_role, t.ts AS turn_ts",
                 fid=int(fact_id),
             )
@@ -209,16 +220,18 @@ class Auditor:
         out["mentions"] = [
             str(row["norm"])
             for row in self.client.run(
-                f"MATCH (f:{schema.FACT})-[:{schema.MENTIONS}]->(e:{schema.ENTITY}) "
-                "WHERE f.id = $fid RETURN e.norm AS norm ORDER BY e.norm",
+                f"MATCH (f:{schema.FACT} {{id: $fid}})"
+                f"-[:{schema.MENTIONS}]->(e:{schema.ENTITY}) "
+                "RETURN e.norm AS norm ORDER BY e.norm",
                 fid=int(fact_id),
             )
         ]
         out["supersedes"] = [
             dict(row)
             for row in self.client.run(
-                f"MATCH (f:{schema.FACT})-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) "
-                "WHERE f.id = $fid RETURN b.id AS fact_id, b.text AS text, "
+                f"MATCH (f:{schema.FACT} {{id: $fid}})"
+                f"-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) "
+                "RETURN b.id AS fact_id, b.text AS text, "
                 "b.vfrom AS valid_from, b.vto AS valid_to",
                 fid=int(fact_id),
             )
@@ -226,8 +239,9 @@ class Auditor:
         out["superseded_by"] = [
             dict(row)
             for row in self.client.run(
-                f"MATCH (a:{schema.FACT})-[:{schema.SUPERSEDES}]->(f:{schema.FACT}) "
-                "WHERE f.id = $fid RETURN a.id AS fact_id, a.text AS text, "
+                f"MATCH (a:{schema.FACT})"
+                f"-[:{schema.SUPERSEDES}]->(f:{schema.FACT} {{id: $fid}}) "
+                "RETURN a.id AS fact_id, a.text AS text, "
                 "a.vfrom AS valid_from, a.vto AS valid_to",
                 fid=int(fact_id),
             )
@@ -235,8 +249,9 @@ class Auditor:
         out["cited_by"] = [
             dict(row)
             for row in self.client.run(
-                f"MATCH (a:{schema.ANSWER})-[:{schema.CITES}]->(f:{schema.FACT}) "
-                "WHERE f.id = $fid RETURN a.id AS answer_id, a.text AS answer, "
+                f"MATCH (a:{schema.ANSWER})"
+                f"-[:{schema.CITES}]->(f:{schema.FACT} {{id: $fid}}) "
+                "RETURN a.id AS answer_id, a.text AS answer, "
                 "a.ts AS ts ORDER BY a.ts DESC LIMIT 20",
                 fid=int(fact_id),
             )
@@ -250,8 +265,8 @@ class Auditor:
         survived, which is the half of the trail a demo usually cannot show.
         """
         rows = self.client.run(
-            f"MATCH (r:{schema.REJECTION})-[:{schema.RAISED_BY}]->(t:{schema.TURN}) "
-            "WHERE r.corpus = $corpus "
+            f"MATCH (r:{schema.REJECTION} {{corpus: $corpus}})"
+            f"-[:{schema.RAISED_BY}]->(t:{schema.TURN}) "
             "RETURN r.id AS rejection_id, r.rule AS rule, r.text AS text, "
             "r.reason AS reason, r.ts AS ts, t.id AS turn_id, t.sid AS session, "
             "t.role AS role, t.tier AS tier "
@@ -273,15 +288,16 @@ class Auditor:
         all_facts = {
             int(row["id"])
             for row in self.client.run(
-                f"MATCH (f:{schema.FACT}) WHERE f.corpus = $corpus RETURN f.id AS id",
+                f"MATCH (f:{schema.FACT} {{corpus: $corpus}}) RETURN f.id AS id",
                 corpus=self.corpus,
             )
         }
         derived = {
             int(row["id"])
             for row in self.client.run(
-                f"MATCH (f:{schema.FACT})-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) "
-                "WHERE f.corpus = $corpus RETURN DISTINCT f.id AS id",
+                f"MATCH (f:{schema.FACT} {{corpus: $corpus}})"
+                f"-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) "
+                "RETURN DISTINCT f.id AS id",
                 corpus=self.corpus,
             )
         }
@@ -293,16 +309,16 @@ class Auditor:
         endpoints = {
             (int(row["a"]), int(row["b"]))
             for row in self.client.run(
-                f"MATCH (a:{schema.FACT})-[:{schema.SUPERSEDES}]->(b) "
-                "WHERE a.corpus = $corpus RETURN a.id AS a, b.id AS b",
+                f"MATCH (a:{schema.FACT} {{corpus: $corpus}})"
+                f"-[:{schema.SUPERSEDES}]->(b) RETURN a.id AS a, b.id AS b",
                 corpus=self.corpus,
             )
         }
         intact = {
             (int(row["a"]), int(row["b"]))
             for row in self.client.run(
-                f"MATCH (a:{schema.FACT})-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) "
-                "WHERE a.corpus = $corpus RETURN a.id AS a, b.id AS b",
+                f"MATCH (a:{schema.FACT} {{corpus: $corpus}})"
+                f"-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) RETURN a.id AS a, b.id AS b",
                 corpus=self.corpus,
             )
         }
@@ -311,8 +327,8 @@ class Auditor:
         leaked = [
             int(row["id"])
             for row in self.client.run(
-                f"MATCH (a:{schema.ANSWER})-[:{schema.CITES}]->(f:{schema.FACT}) "
-                "WHERE f.corpus = $corpus AND f.status = $status "
+                f"MATCH (a:{schema.ANSWER})"
+                f"-[:{schema.CITES}]->(f:{schema.FACT} {{corpus: $corpus, status: $status}}) "
                 "RETURN DISTINCT f.id AS id",
                 corpus=self.corpus,
                 status=schema.QUARANTINED,
@@ -320,7 +336,7 @@ class Auditor:
         ]
 
         quarantined = self.client.run(
-            f"MATCH (f:{schema.FACT}) WHERE f.corpus = $corpus AND f.status = $status "
+            f"MATCH (f:{schema.FACT} {{corpus: $corpus, status: $status}}) "
             "RETURN count(*) AS n",
             corpus=self.corpus,
             status=schema.QUARANTINED,
@@ -354,7 +370,7 @@ class Auditor:
             schema.REJECTION,
         ):
             rows = self.client.run(
-                f"MATCH (n:{label}) WHERE n.corpus = $corpus RETURN count(*) AS n",
+                f"MATCH (n:{label} {{corpus: $corpus}}) RETURN count(*) AS n",
                 corpus=self.corpus,
             )
             out[label.lower()] = int(rows[0]["n"]) if rows else 0

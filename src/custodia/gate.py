@@ -20,6 +20,15 @@ case, and the temptation is removed by not having the distinction.
 The answering model never sees the conversation. It sees the warrant, and each
 fact's own provenance snippet - the turn that fact was lifted from, and nothing
 around it.
+
+There is one path that produces an answer without a model at all. When no model
+is reachable, the gate may quote the top-ranked fact *verbatim* and cite exactly
+that fact. It is a narrower answerer, not a looser one: a stricter evidence floor
+than the model path, a required margin over the runner-up, and a term the
+question and that fact share which the rest of the warrant does not. Nothing it
+emits was not already in the graph, and it labels itself `extractive`, so a
+reader can never mistake it for a model's answer. What it buys is that Custodia
+is fully operable with zero credentials.
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
-from custodia import config, schema
+from custodia import config, lexical, schema
 from custodia.retrieve import LanguageModel, Retriever, Warrant
 from custodia.schema import Evidence
 
@@ -49,11 +58,54 @@ CHECK_IN_WARRANT = "citations_in_warrant"
 CHECK_TEXT = "answer_text"
 CHECK_NOT_REFUSAL = "answer_not_refusal"
 CHECK_SUPPORTED = "citations_supported"
+#: not a gate; recorded when the deterministic answerer ran
+CHECK_EXTRACTIVE = "extractive_answer"
 
 #: reasons that never reached a check, because the provider did not answer
 REASON_UNAVAILABLE = "provider_unavailable"
 REASON_TIMEOUT = "provider_timeout"
 REASON_ERROR = "provider_error"
+
+# The vocabulary `abstained_because` speaks. It is deliberately smaller and more
+# stable than the check names: the checks are internal and will grow, while these
+# seven are rendered by the API, the CLI and the MCP surface. The check that
+# actually failed is still the last entry in `Verdict.checks`.
+NO_EVIDENCE = "no-evidence"
+INSUFFICIENT = "insufficient-evidence"
+NO_CITATIONS = "no-citations"
+INVENTED_CITATION = "invented-citation"
+UNVERIFIED_CITATION = "unverified-citation"
+MODEL_UNAVAILABLE = "model-unavailable"
+MALFORMED_RESPONSE = "malformed-response"
+
+_REASON_FOR = {
+    CHECK_WARRANT: NO_EVIDENCE,
+    CHECK_MODEL: MODEL_UNAVAILABLE,
+    CHECK_JSON: MALFORMED_RESPONSE,
+    CHECK_SCHEMA: MALFORMED_RESPONSE,
+    CHECK_SUFFICIENT: INSUFFICIENT,
+    CHECK_CITED: NO_CITATIONS,
+    CHECK_IN_WARRANT: INVENTED_CITATION,
+    CHECK_TEXT: MALFORMED_RESPONSE,
+    CHECK_NOT_REFUSAL: INSUFFICIENT,
+    CHECK_SUPPORTED: UNVERIFIED_CITATION,
+    REASON_UNAVAILABLE: MODEL_UNAVAILABLE,
+    REASON_TIMEOUT: MODEL_UNAVAILABLE,
+    REASON_ERROR: MODEL_UNAVAILABLE,
+}
+
+#: `Verdict.model` when the answer came from the graph rather than a provider
+EXTRACTIVE_MODEL = "extractive"
+
+#: The deterministic answerer quotes nothing scoring below this. Far stricter
+#: than `Settings.evidence_floor`, which only decides what may enter a warrant:
+#: this decides what may be served as an answer with no model to sanity-check it.
+EXTRACTIVE_FLOOR = 0.45
+
+#: ...and nothing the runner-up is within this much of. Two near-equal facts is
+#: exactly the case that needs reading comprehension, which is the one faculty
+#: this path does not have.
+EXTRACTIVE_MARGIN = 0.08
 
 #: how much of a fact's originating turn is shown as its provenance snippet
 SNIPPET = 240
@@ -66,7 +118,7 @@ SNIPPET = 240
 _REFUSAL = re.compile(
     r"^\s*(?:i\s+(?:do\s+not|don't|cannot|can't|am\s+unable\s+to)\s+"
     r"(?:know|say|tell|find|answer|determine|have)"
-    r"|i\s+have\s+no\s+(?:information|record|evidence|memory)"
+    r"|i\s+have\s+no\s+(?:information|record|evidence|memory|idea)"
     r"|there\s+is\s+no\s+(?:information|record|evidence)"
     r"|no\s+(?:information|record|evidence)\s+(?:is\s+)?(?:available|found)"
     r"|(?:the\s+)?(?:warrant|memory|evidence)\s+(?:is\s+)?(?:in)?sufficient"
@@ -148,11 +200,13 @@ class Gate:
         llm: LanguageModel | None = None,
         settings: config.Settings | None = None,
         auditor: Any | None = None,
+        extractive: bool = True,
     ) -> None:
         self.retriever = retriever
         self.llm = llm
         self.settings = settings or retriever.settings or config.settings()
         self.auditor = auditor
+        self.extractive = extractive
 
     # --------------------------------------------------------------------- ask
 
@@ -179,14 +233,39 @@ class Gate:
         checks: list[str] = []
         model = self.settings.answer_model if self.llm is not None else ""
 
-        def abstain(reason: str) -> Verdict:
+        def abstain(failed: str) -> Verdict:
             return Verdict(
                 answered=False,
-                answer=abstention(question, warrant, reason),
+                answer=abstention(question, warrant, failed),
                 citations=[],
-                abstained_because=reason,
+                abstained_because=_REASON_FOR.get(failed, MODEL_UNAVAILABLE),
                 warrant=warrant,
                 model=model,
+                checks=checks,
+            )
+
+        def quote(failed: str) -> Verdict:
+            """No model reachable: quote memory, or fall through to the refusal.
+
+            The reason carried into an abstention here is the *original* one -
+            the model was unavailable - because that is the honest root cause.
+            `CHECK_EXTRACTIVE` in the trail records that the deterministic path
+            was tried and declined.
+            """
+            if not self.extractive:
+                return abstain(failed)
+            checks.append(CHECK_EXTRACTIVE)
+            pick = self._quotable(warrant)
+            if pick is None:
+                return abstain(failed)
+            return Verdict(
+                answered=True,
+                answer=pick.text,
+                citations=[pick.fid],
+                abstained_because="",
+                warrant=warrant,
+                model=EXTRACTIVE_MODEL,
+                verified=0,
                 checks=checks,
             )
 
@@ -196,7 +275,7 @@ class Gate:
 
         checks.append(CHECK_MODEL)
         if self.llm is None or not getattr(self.llm, "enabled", False):
-            return abstain(CHECK_MODEL)
+            return quote(CHECK_MODEL)
 
         checks.append(CHECK_JSON)
         try:
@@ -209,7 +288,13 @@ class Gate:
                 max_tokens=1024,
             )
         except Exception as exc:
-            return abstain(_classify(exc))
+            failed = _classify(exc)
+            checks.append(failed)
+            # a provider that could not produce a completion is the same
+            # situation as no provider at all; anything else is a hard failure
+            if failed == REASON_UNAVAILABLE:
+                return quote(failed)
+            return abstain(failed)
         if not isinstance(reply, dict):
             return abstain(CHECK_JSON)
 
@@ -262,6 +347,33 @@ class Gate:
             verified=verified,
             checks=checks,
         )
+
+    # ------------------------------------------------- the deterministic answer
+
+    def _quotable(self, warrant: Warrant) -> Evidence | None:
+        """The one fact this warrant can be answered with, or nothing.
+
+        Answering by quotation is only honest when the warrant has already done
+        the choosing, so three conditions stand in for the reading a model would
+        otherwise do. The top fact has to be strong on its own terms; it has to
+        be clearly ahead of the next one; and it has to be on the *subject* -
+        see :func:`_distinctive`, which is what stops "which gym?" being answered
+        with the highest-scoring fact about the dog. Fail any of them and there is
+        a judgement to make and nothing here able to make it.
+        """
+        evidence = warrant.evidence
+        if not evidence:
+            return None
+        top = evidence[0]
+        if not top.text.strip():
+            return None
+        if top.score < EXTRACTIVE_FLOOR:
+            return None
+        if len(evidence) > 1 and (top.score - evidence[1].score) < EXTRACTIVE_MARGIN:
+            return None
+        if not _distinctive(warrant.question, evidence):
+            return None
+        return top
 
     # ------------------------------------------------------------- second pass
 
@@ -396,8 +508,8 @@ def abstention(question: str, warrant: Warrant, reason: str) -> str:
 _TAILS = {
     CHECK_WARRANT: "nothing stored matched closely enough to build an answer on.",
     CHECK_MODEL: (
-        "the answering model was unavailable, and I do not answer from memory "
-        "I cannot check."
+        "the answering model was unavailable, and none of them was decisive "
+        "enough to answer with on its own."
     ),
     CHECK_JSON: "the answer came back malformed, so I discarded it rather than guess at it.",
     CHECK_SCHEMA: "the answer came back malformed, so I discarded it rather than guess at it.",
@@ -412,8 +524,8 @@ _TAILS = {
         "the evidence cited turned out not to support the answer, so I discarded it."
     ),
     REASON_UNAVAILABLE: (
-        "the answering model was unavailable, and I do not answer from memory "
-        "I cannot check."
+        "the answering model was unavailable, and none of them was decisive "
+        "enough to answer with on its own."
     ),
     REASON_TIMEOUT: (
         "the answering model timed out, and I do not answer from memory I cannot check."
@@ -432,6 +544,25 @@ def interval_end(valid_to: int) -> str:
     if valid_to == schema.OPEN_INTERVAL:
         return "open"
     return stamp(valid_to)
+
+
+def _distinctive(question: str, evidence: Sequence[Evidence]) -> bool:
+    """Does the top fact answer *this* question, or merely rank first?
+
+    A retrieval score blends things that have nothing to do with the question -
+    tier, recency, corroboration - so the best-scoring fact in a warrant about a
+    person can easily be a fact about that person that was not asked for. The
+    test is a term the question and the fact share which the rest of the warrant
+    does *not*: a token every other fact also carries ("user") identifies the
+    subject, not the answer, so it cannot be what makes this fact the one.
+    """
+    asked = set(lexical.tokenize(question))
+    if not asked:
+        return False
+    top = set(lexical.tokenize(evidence[0].text))
+    others = [set(lexical.tokenize(e.text)) for e in evidence[1:]]
+    shared = set.intersection(*others) if others else set()
+    return bool((asked & top) - shared)
 
 
 def _explain_one(item: Evidence) -> dict[str, Any]:

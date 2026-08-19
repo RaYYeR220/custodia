@@ -19,8 +19,11 @@ services:
       GRAPH_CELL_ID: cell-0
       GRAPH_CELLS: cell-0
       GRAPH_NODE_ID: node-0
-      GRAPH_BOLT_NODE_ADDRESSES: node-0=127.0.0.1:7687
-      GRAPH_ADVERTISED_BOLT_ADDR: 127.0.0.1:7687
+      # The advertised address is what the driver's routing discovery hands back
+      # to a client, so it has to be a name the client can actually reach. Left as
+      # 127.0.0.1 it sends the API container looking for the graph inside itself.
+      GRAPH_BOLT_NODE_ADDRESSES: node-0=hydradb:7687
+      GRAPH_ADVERTISED_BOLT_ADDR: hydradb:7687
       GRAPH_DATA_CACHE_DIR: /data/cache
       GRAPH_AUTH_TOKEN_FILE: /data/auth-token
       GRAPH_ALLOW_PLAINTEXT: "true"
@@ -44,15 +47,16 @@ services:
     ports:
       - "8080:8080"
     environment:
-      HYDRA_URI: neo4j://hydradb:7687
+      HYDRA_URI: bolt://hydradb:7687
       HYDRA_TOKEN: local-development-token-32-bytes
       CUSTODIA_CORPUS: demo
       CUSTODIA_CACHE_DIR: /app/data/cache
       # no key configured -> the shipped response cache serves the demo
       CUSTODIA_LLM_BASE_URL: ${CUSTODIA_LLM_BASE_URL:-https://openrouter.ai/api/v1}
       CUSTODIA_LLM_API_KEY: ${CUSTODIA_LLM_API_KEY:-}
-      CUSTODIA_EXTRACT_MODEL: ${CUSTODIA_EXTRACT_MODEL:-google/gemini-2.5-flash}
-      CUSTODIA_ANSWER_MODEL: ${CUSTODIA_ANSWER_MODEL:-google/gemini-2.5-flash}
+      CUSTODIA_EXTRACT_MODEL: ${CUSTODIA_EXTRACT_MODEL:-}
+      CUSTODIA_ANSWER_MODEL: ${CUSTODIA_ANSWER_MODEL:-}
+      CUSTODIA_LLM_RPM: ${CUSTODIA_LLM_RPM:-}
     volumes:
       - ./data:/app/data
     depends_on:

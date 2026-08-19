@@ -3,7 +3,12 @@
 The claim under test is narrow: no reply from a language model, however
 confident, well-formed or insistent, can produce an answer that the warrant does
 not justify. So each test here breaks exactly one thing and asserts the same
-outcome - `answered is False`, with the failed check named.
+outcome - `answered is False`, with the shared reason string the surfaces render
+and the specific check that failed at the end of the trail.
+
+The deterministic answerer gets the same treatment from the other side: it is
+only allowed to speak when no model is reachable *and* the warrant has already
+made the choice for it, so most of its tests are about it staying quiet.
 """
 
 from __future__ import annotations
@@ -102,6 +107,21 @@ GYM = 4_611_686_018_427_387_903
 MILK = 1_234_567_890_123_456_789
 INVENTED = 999_999_999_999
 
+GYM_TEXT = "The user's gym is Northline Fitness."
+
+
+def decisive() -> Warrant:
+    """One clearly-ahead fact: the deterministic answerer may quote it."""
+    return warrant_of(evidence(GYM, GYM_TEXT, score=0.82))
+
+
+def ambiguous() -> Warrant:
+    """Two facts within the margin: nothing but reading can choose between them."""
+    return warrant_of(
+        evidence(GYM, GYM_TEXT, score=0.80),
+        evidence(MILK, "The user drinks oat milk.", score=0.78),
+    )
+
 
 @pytest.fixture()
 def settings() -> config.Settings:
@@ -123,9 +143,6 @@ def good_reply(*citations: int) -> dict:
     }
 
 
-FULL = None  # placeholder replaced per-test by warrant_of(...)
-
-
 # ---- abstention branches --------------------------------------------------- #
 
 
@@ -134,100 +151,89 @@ def test_empty_warrant_never_reaches_the_model(settings):
     verdict = build(warrant_of(), llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_WARRANT
+    assert verdict.abstained_because == gate.NO_EVIDENCE
     assert verdict.checks == [gate.CHECK_WARRANT]
-    assert llm.calls == []
-
-
-def test_no_model_configured_abstains(settings):
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), None, settings).ask("q", record=False)
-    assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_MODEL
-
-
-def test_a_disabled_model_abstains(settings):
-    llm = StubLLM(good_reply(GYM), enabled=False)
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.abstained_because == gate.CHECK_MODEL
     assert llm.calls == []
 
 
 def test_a_non_mapping_reply_abstains(settings):
     llm = StubLLM(["not", "an", "object"])
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_JSON
-
-
-def test_unparseable_json_from_the_provider_abstains(settings):
-    from custodia.llm import LLMUnavailable
-
-    llm = StubLLM(LLMUnavailable("model did not return parseable JSON"))
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.answered is False
-    assert verdict.abstained_because == gate.REASON_UNAVAILABLE
+    assert verdict.abstained_because == gate.MALFORMED_RESPONSE
+    assert verdict.checks[-1] == gate.CHECK_JSON
 
 
 def test_a_reply_missing_required_keys_abstains(settings):
     llm = StubLLM({"answer": "Northline.", "sufficient": True})  # no citations key
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.abstained_because == gate.CHECK_SCHEMA
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+
+    assert verdict.abstained_because == gate.MALFORMED_RESPONSE
+    assert verdict.checks[-1] == gate.CHECK_SCHEMA
 
 
 def test_sufficient_false_short_circuits(settings):
     llm = StubLLM({"answer": "Probably Northline.", "citations": [GYM], "sufficient": False})
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_SUFFICIENT
+    assert verdict.abstained_because == gate.INSUFFICIENT
+    assert verdict.checks[-1] == gate.CHECK_SUFFICIENT
     assert "Probably Northline" not in verdict.answer
 
 
 def test_a_truthy_but_non_boolean_sufficient_is_not_accepted(settings):
     llm = StubLLM({"answer": "Northline.", "citations": [GYM], "sufficient": "yes"})
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.abstained_because == gate.CHECK_SUFFICIENT
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+    assert verdict.checks[-1] == gate.CHECK_SUFFICIENT
 
 
 def test_an_empty_citation_list_abstains(settings):
     llm = StubLLM(good_reply())
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.abstained_because == gate.CHECK_CITED
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+
+    assert verdict.abstained_because == gate.NO_CITATIONS
+    assert verdict.checks[-1] == gate.CHECK_CITED
 
 
 def test_a_hallucinated_citation_id_abstains(settings):
     llm = StubLLM(good_reply(INVENTED))
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
 
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_IN_WARRANT
+    assert verdict.abstained_because == gate.INVENTED_CITATION
+    assert verdict.checks[-1] == gate.CHECK_IN_WARRANT
     assert verdict.citations == []
     assert "Northline" not in verdict.answer
 
 
 def test_one_invented_id_among_real_ones_discards_the_whole_answer(settings):
-    warrant = warrant_of(evidence(GYM, "Northline."), evidence(MILK, "Oat milk."))
     llm = StubLLM(good_reply(GYM, INVENTED))
-    verdict = build(warrant, llm, settings).ask("q", record=False)
-    assert verdict.abstained_because == gate.CHECK_IN_WARRANT
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+    assert verdict.abstained_because == gate.INVENTED_CITATION
 
 
 def test_citations_that_are_not_ids_at_all_abstain(settings):
     llm = StubLLM({"answer": "Northline.", "citations": ["fact one"], "sufficient": True})
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.abstained_because == gate.CHECK_CITED
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+    assert verdict.abstained_because == gate.NO_CITATIONS
 
 
 def test_a_citation_id_sent_as_a_string_is_accepted(settings):
     llm = StubLLM({"answer": "Northline.", "citations": [str(GYM)], "sufficient": True})
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+
     assert verdict.answered is True
     assert verdict.citations == [GYM]
 
 
 def test_an_empty_answer_abstains(settings):
     llm = StubLLM({"answer": "   ", "citations": [GYM], "sufficient": True})
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.abstained_because == gate.CHECK_TEXT
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+
+    assert verdict.abstained_because == gate.MALFORMED_RESPONSE
+    assert verdict.checks[-1] == gate.CHECK_TEXT
 
 
 @pytest.mark.parametrize(
@@ -238,13 +244,16 @@ def test_an_empty_answer_abstains(settings):
         "There is no record of the user's gym.",
         "Insufficient evidence to answer.",
         "Unable to determine the user's gym.",
+        "I have no idea.",
     ],
 )
 def test_an_answer_that_is_itself_a_refusal_abstains(settings, text):
     llm = StubLLM({"answer": text, "citations": [GYM], "sufficient": True})
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
+
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_NOT_REFUSAL
+    assert verdict.abstained_because == gate.INSUFFICIENT
+    assert verdict.checks[-1] == gate.CHECK_NOT_REFUSAL
 
 
 def test_a_hedged_but_real_answer_is_not_mistaken_for_a_refusal(settings):
@@ -255,9 +264,8 @@ def test_a_hedged_but_real_answer_is_not_mistaken_for_a_refusal(settings):
             "sufficient": True,
         }
     )
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
     assert verdict.answered is False  # opening clause is a refusal, so it is caught
-    assert verdict.abstained_because == gate.CHECK_NOT_REFUSAL
 
     llm = StubLLM(
         {
@@ -266,40 +274,34 @@ def test_a_hedged_but_real_answer_is_not_mistaken_for_a_refusal(settings):
             "sufficient": True,
         }
     )
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("q", record=False)
     assert verdict.answered is True
-
-
-def test_provider_unavailable_abstains(settings):
-    from custodia.llm import LLMUnavailable
-
-    llm = StubLLM(LLMUnavailable("no credentials configured"))
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
-    assert verdict.answered is False
-    assert verdict.abstained_because == gate.REASON_UNAVAILABLE
 
 
 def test_a_timeout_abstains(settings):
     llm = StubLLM(TimeoutError("read timed out"))
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(decisive(), llm, settings).ask("q", record=False)
+
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.REASON_TIMEOUT
+    assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
+    assert verdict.checks[-1] == gate.REASON_TIMEOUT
 
 
 def test_an_unexpected_transport_error_abstains(settings):
     llm = StubLLM(ConnectionResetError("peer reset"))
-    verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask("q", record=False)
+    verdict = build(decisive(), llm, settings).ask("q", record=False)
+
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.REASON_ERROR
+    assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
+    assert verdict.checks[-1] == gate.REASON_ERROR
 
 
 # ---- the happy path -------------------------------------------------------- #
 
 
 def test_a_warranted_answer_is_served(settings):
-    warrant = warrant_of(evidence(GYM, "The user's gym is Northline Fitness."))
     llm = StubLLM(good_reply(GYM))
-    verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
+    verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is True
     assert verdict.answer == "The user goes to Northline Fitness."
@@ -311,13 +313,12 @@ def test_a_warranted_answer_is_served(settings):
 
 
 def test_the_model_sees_the_warrant_and_not_the_conversation(settings):
-    warrant = warrant_of(evidence(GYM, "The user's gym is Northline Fitness."))
     llm = StubLLM(good_reply(GYM))
-    build(warrant, llm, settings).ask("Which gym?", record=False)
+    build(decisive(), llm, settings).ask("Which gym?", record=False)
 
     prompt = llm.calls[0][-1]["content"]
     assert str(GYM) in prompt
-    assert "The user's gym is Northline Fitness." in prompt
+    assert GYM_TEXT in prompt
     assert "I switched to Northline Fitness last week." in prompt  # its own snippet only
     assert "conversation" not in prompt.lower()
 
@@ -336,9 +337,8 @@ def test_as_of_is_passed_through_to_retrieval(settings):
 
 def test_the_verifier_confirms_a_good_citation(settings):
     settings.verify_citations = True
-    warrant = warrant_of(evidence(GYM, "The user's gym is Northline Fitness."))
     llm = StubLLM(good_reply(GYM), {"supports": True})
-    verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
+    verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is True
     assert verdict.verified == 1
@@ -347,12 +347,8 @@ def test_the_verifier_confirms_a_good_citation(settings):
 
 def test_the_verifier_drops_a_citation_that_does_not_support_the_answer(settings):
     settings.verify_citations = True
-    warrant = warrant_of(
-        evidence(GYM, "The user's gym is Northline Fitness."),
-        evidence(MILK, "The user drinks oat milk."),
-    )
     llm = StubLLM(good_reply(GYM, MILK), {"supports": True}, {"supports": False})
-    verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
+    verdict = build(ambiguous(), llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is True
     assert verdict.citations == [GYM]
@@ -366,7 +362,8 @@ def test_the_verifier_rejecting_every_citation_abstains(settings):
     verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_SUPPORTED
+    assert verdict.abstained_because == gate.UNVERIFIED_CITATION
+    assert verdict.checks[-1] == gate.CHECK_SUPPORTED
     assert verdict.verified == 0
 
 
@@ -374,23 +371,140 @@ def test_a_verifier_that_errors_drops_the_citation_rather_than_trusting_it(setti
     from custodia.llm import LLMUnavailable
 
     settings.verify_citations = True
-    warrant = warrant_of(evidence(GYM, "Northline."))
     llm = StubLLM(good_reply(GYM), LLMUnavailable("provider down"))
-    verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
+    verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
 
+    # the model already answered, so the deterministic path may not rescue it
     assert verdict.answered is False
-    assert verdict.abstained_because == gate.CHECK_SUPPORTED
+    assert verdict.abstained_because == gate.UNVERIFIED_CITATION
 
 
 def test_verification_is_skipped_when_disabled(settings):
     settings.verify_citations = False
-    warrant = warrant_of(evidence(GYM, "Northline."))
     llm = StubLLM(good_reply(GYM))
-    verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
+    verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is True
     assert gate.CHECK_SUPPORTED not in verdict.checks
     assert len(llm.calls) == 1
+
+
+# ---- the deterministic answerer -------------------------------------------- #
+
+
+def test_with_no_model_a_decisive_warrant_is_quoted_verbatim(settings):
+    verdict = build(decisive(), None, settings).ask("Which gym?", record=False)
+
+    assert verdict.answered is True
+    assert verdict.answer == GYM_TEXT  # exactly what the graph holds, nothing added
+    assert verdict.citations == [GYM]
+    assert verdict.model == gate.EXTRACTIVE_MODEL
+    assert verdict.verified == 0
+    assert gate.CHECK_EXTRACTIVE in verdict.checks
+
+
+def test_a_disabled_model_takes_the_same_path(settings):
+    llm = StubLLM(good_reply(GYM), enabled=False)
+    verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
+
+    assert verdict.answered is True
+    assert verdict.model == gate.EXTRACTIVE_MODEL
+    assert llm.calls == []
+
+
+def test_a_provider_that_cannot_complete_falls_back_to_quoting(settings):
+    from custodia.llm import LLMUnavailable
+
+    llm = StubLLM(LLMUnavailable("cache miss under cache_only"))
+    verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
+
+    assert verdict.answered is True
+    assert verdict.answer == GYM_TEXT
+    assert verdict.model == gate.EXTRACTIVE_MODEL
+    assert verdict.checks[-1] == gate.CHECK_EXTRACTIVE
+
+
+def test_two_close_facts_are_not_quoted(settings):
+    verdict = build(ambiguous(), None, settings).ask("Which gym?", record=False)
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
+    assert gate.CHECK_EXTRACTIVE in verdict.checks
+    assert verdict.citations == []
+
+
+def test_weak_evidence_is_not_quoted_even_when_it_stands_alone(settings):
+    weak = warrant_of(evidence(GYM, GYM_TEXT, score=gate.EXTRACTIVE_FLOOR - 0.01))
+    verdict = build(weak, None, settings).ask("Which gym?", record=False)
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
+
+
+def test_a_clear_winner_beside_an_unrelated_fact_is_still_quoted(settings):
+    warrant = warrant_of(
+        evidence(GYM, GYM_TEXT, score=0.82),
+        evidence(MILK, "The user's dog is called Pip.", score=0.50),
+    )
+    verdict = build(warrant, None, settings).ask("Which gym?", record=False)
+
+    assert verdict.answered is True
+    assert verdict.answer == GYM_TEXT
+
+
+def test_the_top_fact_is_not_quoted_when_it_is_off_the_subject(settings):
+    """Ranking first is not the same as being the answer to this question."""
+    warrant = warrant_of(
+        evidence(GYM, GYM_TEXT, score=0.82),
+        evidence(MILK, "The user's dog is called Pip.", score=0.50),
+        question="Who is the user's dentist?",
+    )
+    verdict = build(warrant, None, settings).ask("Who is the user's dentist?", record=False)
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
+    assert gate.CHECK_EXTRACTIVE in verdict.checks
+
+
+def test_a_question_of_only_stopwords_is_never_quoted(settings):
+    warrant = warrant_of(evidence(GYM, GYM_TEXT, score=0.90), question="what about it")
+    verdict = build(warrant, None, settings).ask("what about it", record=False)
+    assert verdict.answered is False
+
+
+def test_the_deterministic_floor_is_stricter_than_the_warrant_floor(settings):
+    assert gate.EXTRACTIVE_FLOOR > settings.evidence_floor
+
+
+def test_an_empty_warrant_is_never_quoted(settings):
+    verdict = build(warrant_of(), None, settings).ask("Which gym?", record=False)
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.NO_EVIDENCE
+    assert gate.CHECK_EXTRACTIVE not in verdict.checks
+
+
+def test_the_deterministic_answerer_can_be_turned_off(settings):
+    verdict = build(decisive(), None, settings, extractive=False).ask("q", record=False)
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
+    assert gate.CHECK_EXTRACTIVE not in verdict.checks
+
+
+def test_quoting_never_rescues_a_model_that_did_answer(settings):
+    """Every model-path failure still abstains, decisive warrant or not."""
+    failures = [
+        StubLLM(good_reply(INVENTED)),
+        StubLLM({"answer": "Northline.", "citations": [GYM], "sufficient": False}),
+        StubLLM({"nonsense": True}),
+        StubLLM(["not a mapping"]),
+        StubLLM({"answer": "", "citations": [GYM], "sufficient": True}),
+    ]
+    for llm in failures:
+        verdict = build(decisive(), llm, settings).ask("Which gym?", record=False)
+        assert verdict.answered is False, llm.calls
+        assert verdict.model == "stub/answerer"
 
 
 # ---- the refusal a person reads -------------------------------------------- #
@@ -418,25 +532,33 @@ def test_every_failure_produces_the_same_shape_of_refusal(settings):
         StubLLM({"nonsense": True}),
     ]
     for llm in failures:
-        verdict = build(warrant_of(evidence(GYM, "Northline.")), llm, settings).ask(
-            "Which gym?", record=False
-        )
+        verdict = build(ambiguous(), llm, settings).ask("Which gym?", record=False)
         assert verdict.answered is False
         assert verdict.citations == []
         assert verdict.answer.startswith("I don't have enough in memory")
         assert verdict.abstained_because
 
 
+def test_the_reason_vocabulary_is_closed(settings):
+    """Nothing leaves the gate that the surfaces cannot render."""
+    known = {
+        gate.NO_EVIDENCE,
+        gate.INSUFFICIENT,
+        gate.NO_CITATIONS,
+        gate.INVENTED_CITATION,
+        gate.UNVERIFIED_CITATION,
+        gate.MODEL_UNAVAILABLE,
+        gate.MALFORMED_RESPONSE,
+    }
+    assert set(gate._REASON_FOR.values()) <= known
+
+
 # ---- explain and write-back ------------------------------------------------ #
 
 
 def test_explain_returns_the_chain_and_interval_per_citation(settings):
-    warrant = warrant_of(
-        evidence(GYM, "The user's gym is Northline Fitness."),
-        evidence(MILK, "The user drinks oat milk.", score=0.3),
-    )
     llm = StubLLM(good_reply(GYM))
-    gate_ = build(warrant, llm, settings)
+    gate_ = build(ambiguous(), llm, settings)
     verdict = gate_.ask("Which gym?", record=False)
     explained = gate_.explain(verdict)
 
@@ -451,23 +573,23 @@ def test_explain_returns_the_chain_and_interval_per_citation(settings):
 def test_explain_works_for_an_abstention(settings):
     gate_ = build(warrant_of(), None, settings)
     explained = gate_.explain(gate_.ask("Which gym?", record=False))
+
     assert explained["answered"] is False
     assert explained["citations"] == []
-    assert explained["abstained_because"] == gate.CHECK_WARRANT
+    assert explained["abstained_because"] == gate.NO_EVIDENCE
 
 
 def test_the_auditor_sees_answers_and_abstentions(settings):
     auditor = RecordingAuditor()
-    warrant = warrant_of(evidence(GYM, "Northline."))
-    build(warrant, StubLLM(good_reply(GYM)), settings, auditor=auditor).ask("Which gym?")
-    build(warrant, StubLLM(good_reply(INVENTED)), settings, auditor=auditor).ask("Which gym?")
+    build(ambiguous(), StubLLM(good_reply(GYM)), settings, auditor=auditor).ask("Which gym?")
+    build(ambiguous(), StubLLM(good_reply(INVENTED)), settings, auditor=auditor).ask("Which gym?")
 
     assert [v.answered for _, _, v in auditor.records] == [True, False]
 
 
 def test_record_false_writes_nothing(settings):
     auditor = RecordingAuditor()
-    build(warrant_of(evidence(GYM, "N.")), StubLLM(good_reply(GYM)), settings, auditor=auditor).ask(
+    build(decisive(), StubLLM(good_reply(GYM)), settings, auditor=auditor).ask(
         "Which gym?", record=False
     )
     assert auditor.records == []
@@ -476,7 +598,7 @@ def test_record_false_writes_nothing(settings):
 def test_an_audit_failure_does_not_turn_an_abstention_into_an_answer(settings):
     auditor = RecordingAuditor(explode=True)
     verdict = build(
-        warrant_of(evidence(GYM, "N.")), StubLLM(good_reply(GYM)), settings, auditor=auditor
+        decisive(), StubLLM(good_reply(GYM)), settings, auditor=auditor
     ).ask("Which gym?")
     assert verdict.answered is True  # the answer stands; only the write-back failed
 
@@ -484,10 +606,19 @@ def test_an_audit_failure_does_not_turn_an_abstention_into_an_answer(settings):
 def test_verdict_as_dict_is_serialisable(settings):
     import json
 
-    warrant = warrant_of(evidence(GYM, "Northline."))
-    verdict = build(warrant, StubLLM(good_reply(GYM)), settings).ask("Which gym?", record=False)
+    verdict = build(decisive(), StubLLM(good_reply(GYM)), settings).ask(
+        "Which gym?", record=False
+    )
     payload = json.loads(json.dumps(verdict.as_dict()))
 
-    assert payload["answered"] is True
+    assert set(payload) == {
+        "answered", "answer", "citations", "abstained_because",
+        "latency_ms", "model", "verified", "checks", "warrant",
+    }
     assert payload["citations"] == [GYM]
-    assert payload["warrant"]["evidence"][0]["fid"] == GYM
+    assert payload["warrant"]["evidence"][0]["fact_id"] == GYM
+    assert set(payload["warrant"]["evidence"][0]) == {
+        "fact_id", "text", "tier", "status", "valid_from", "valid_to", "session",
+        "session_index", "turn_index", "turn_text", "turn_ts", "score", "hops",
+        "path", "superseded_by",
+    }

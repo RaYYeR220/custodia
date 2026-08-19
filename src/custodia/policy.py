@@ -98,7 +98,7 @@ class Rule:
 
     id: str
     kind: str          # "content" | "structural"
-    summary: str       # what the rule defends against, for `custodia policy --rules`
+    summary: str       # what the rule defends against, shown by `custodia policy`
     reason: str        # one-sentence template, formatted with the match context
     pattern: re.Pattern[str] | None = None
 
@@ -109,10 +109,14 @@ class Rule:
             return self.reason
 
     def as_dict(self) -> dict[str, Any]:
+        # ``rule``/``description`` are the names the CLI table and the /policy
+        # endpoint render; ``id``/``summary`` are the names the code uses.
         return {
             "id": self.id,
+            "rule": self.id,
             "kind": self.kind,
             "summary": self.summary,
+            "description": self.summary,
             "reason": self.reason,
             "pattern": self.pattern.pattern.strip() if self.pattern else "",
         }
@@ -120,17 +124,29 @@ class Rule:
 
 _FLAGS = re.IGNORECASE | re.VERBOSE | re.MULTILINE | re.UNICODE
 
-# "forget" is the single highest false-positive risk in the set, so both of its
-# alternatives are guarded against the negated forms people actually write
-# ("don't forget", "do not forget"). Both lookbehinds are fixed width.
+# "owner" and "administrator" are ordinary English before they are a claim of
+# authority. "As the owner of the migration" and "I am the admin of our mailing
+# list" are people describing their day; only an authority claim *over this
+# system* is an attack. So the role words are matched bare, or followed by an
+# object that names the memory itself.
+_OVER_THIS_SYSTEM = r"""
+    (?! \s+ of \s+
+        (?! (?:this\s+|the\s+|your\s+)?
+            (?:account|memory|memories|system|profile|record|records|agent|assistant) \b ) )
+"""
+
 _SELF_ELEVATION = re.compile(
     r"""
       \b as \s+ (?:the|your) \s+ (?:system\s+)?
           (?:administrator|admin|owner|principal|root|superuser|operator) \b
-          (?! \s+ of \s+ (?:a|an|my|his|her|their|our) \b )
+    """
+    + _OVER_THIS_SYSTEM
+    + r"""
     | \b i \s+ am \s+ (?:the|your) \s+ (?:system\s+)?
           (?:owner|administrator|admin|principal|operator|root|superuser) \b
-          (?! \s+ of \s+ (?:a|an|my|his|her|their|our) \b )
+    """
+    + _OVER_THIS_SYSTEM
+    + r"""
     | \b (?:trust|authority|clearance|privilege|permission) [\s_-]*
           (?:level|tier|rank)? \s* (?: [:=] | \b is \b ) \s*
           (?:owner|admin|administrator|system|root|high|highest|max|maximum|trusted|full|3) \b
@@ -155,6 +171,9 @@ _SELF_ELEVATION = re.compile(
     _FLAGS,
 )
 
+# "forget" is the single highest false-positive risk in the set, so both of its
+# alternatives are guarded against the negated forms people actually write
+# ("don't forget", "do not forget"). Both lookbehinds are fixed width.
 _INSTRUCTION_INJECTION = re.compile(
     r"""
       \b (?:ignore|disregard|discard|override|overwrite) \b [^.\n]{0,40}?
@@ -282,7 +301,7 @@ OPS = ("assert",) + tuple(sorted(TARGETED_OPS))
 
 
 def describe_rules() -> list[dict[str, Any]]:
-    """The ruleset as printable data -- what ``custodia policy --rules`` shows."""
+    """The ruleset as printable data -- what ``custodia policy`` shows."""
     return [rule.as_dict() for rule in RULES]
 
 
@@ -390,7 +409,7 @@ class RejectionRecord:
     text: str
     tier: str
     turn_id: int                  # vertex id of the turn the write came from
-    target_fact_id: int | None    # vertex id of the fact it tried to act on
+    target_fact_id: int | None    # vertex id of the fact it blocked, if one was written
     ts: int
 
     @property
@@ -434,6 +453,10 @@ class Policy:
 
     # ---------------------------------------------------------------- content
 
+    def describe(self) -> list[dict[str, Any]]:
+        """The active ruleset as printable data, for ``custodia policy`` and ``/policy``."""
+        return [rule.as_dict() for rule in self.rules]
+
     def screen(self, text: str) -> tuple[str, str] | None:
         """Match text against the content rules; ``(rule_id, reason)`` on a hit.
 
@@ -474,27 +497,29 @@ class Policy:
         if screened is None and fact.object:
             screened = self.screen(fact.object)
         if screened is not None:
-            return self._verdict(*screened)
+            return self.verdict(*screened)
 
         forged = self._identity_forgery(fact)
         if forged is not None:
-            return self._verdict(*forged)
+            return self.verdict(*forged)
 
         floored = self._tier_floor(fact, target, operation)
         if floored is not None:
-            return self._verdict(*floored)
+            return self.verdict(*floored)
 
         return Decision.allow()
 
     # ----------------------------------------------------------------- helpers
 
     def verdict(self, rule: str, reason: str) -> Decision:
-        """Build the decision a fired rule produces under the current strictness.
+        """Turn a fired rule into a decision under the current strictness.
 
-        Exposed because the writer screens the *turn* a fact came from as well
-        as the fact itself, and both paths have to fail closed the same way.
+        Public because the writer screens the *turn* a fact came from as well as
+        the fact itself, and both paths have to fail closed the same way.
         """
-        return self._verdict(rule, reason)
+        if self.strict:
+            return Decision(admitted=False, status=QUARANTINED, rule=rule, reason=reason)
+        return Decision(admitted=True, status=ACTIVE, rule=rule, reason=reason)
 
     def rejection(
         self,
@@ -515,11 +540,6 @@ class Policy:
             target_fact_id=target_fact_id,
             ts=ts or fact.ingested_at or fact.valid_from,
         )
-
-    def _verdict(self, rule: str, reason: str) -> Decision:
-        if self.strict:
-            return Decision(admitted=False, status=QUARANTINED, rule=rule, reason=reason)
-        return Decision(admitted=True, status=ACTIVE, rule=rule, reason=reason)
 
     def _identity_forgery(self, fact: Fact) -> tuple[str, str] | None:
         if fact.tier > Tier.TOOL:

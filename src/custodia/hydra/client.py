@@ -80,7 +80,7 @@ class HydraClient:
         batch_size: int = MAX_BATCH,
         connect_timeout: float = 10.0,
     ) -> None:
-        self.uri = uri or os.environ.get("HYDRA_URI", "neo4j://127.0.0.1:7687")
+        self.uri = uri or os.environ.get("HYDRA_URI", "bolt://127.0.0.1:7687")
         self.token = token or os.environ.get("HYDRA_TOKEN", "local-development-token-32-bytes")
         self.batch_size = min(batch_size, 1000)
         self._driver: Driver = GraphDatabase.driver(

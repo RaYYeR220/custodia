@@ -22,6 +22,13 @@ like odd choices otherwise:
 * **Set membership is a per-id statement.** Fetching thirty facts by id is a
   ``UNION`` of thirty single-id arms, batched, because there is no ``IN``.
 
+One more, and it is measured rather than documented anywhere: an equality
+predicate written *inline in the pattern* -- ``MATCH (f:Fact {id: $p})`` -- uses
+the vertex index, while the same predicate in a ``WHERE`` clause does not. On the
+two-hop provenance read the difference is 1080 ms against 5 ms, and it compounds
+across a ``UNION`` of arms. Every equality below is therefore in the pattern, and
+``WHERE`` is left for the predicates that cannot be (``STARTS WITH``, ranges).
+
 Retrieval never requires a language model. A model, when present, only widens the
 seed set; the deterministic noun-phrase heuristic underneath it is what the
 pipeline is actually built on, so a warrant is reproducible and an outage
@@ -32,8 +39,8 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Protocol, Sequence, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable, Protocol, Sequence, runtime_checkable
 
 from custodia import config, lexical, schema
 from custodia.hydra.client import HydraClient, HydraError
@@ -55,21 +62,35 @@ PREFIX_MIN = 4
 #: longest noun phrase the deterministic seeder will propose
 PHRASE_MAX = 3
 
-#: ranking weights; they sum to 1.0 so a score is directly comparable to
-#: `Settings.evidence_floor` and readable in the UI as a percentage
-W_SEED = 0.35
-W_PROXIMITY = 0.20
+# Ranking weights. They sum to 1.0, so a score is directly comparable to
+# `Settings.evidence_floor` and reads as a percentage in the UI.
+#
+# Lexical relevance and graph anchoring are separate terms on purpose, and this
+# is the one weighting decision worth arguing about. Anchoring alone does not
+# discriminate: when the question resolves to a hub entity - `user`, in a corpus
+# that is entirely about one person - every fact hangs off it, every fact scores
+# the same on that term, and the ordering collapses onto recency and tier. The
+# lexical term is what makes "what does the user drink" rank the drink fact
+# above the gym fact, so it carries the larger weight of the two.
+W_LEXICAL = 0.30
+W_ANCHOR = 0.15
+W_PROXIMITY = 0.15
 W_TIER = 0.15
 W_CORROBORATION = 0.10
-W_RECENCY = 0.20
+W_RECENCY = 0.15
 
 #: corroboration saturates: the fourth independent witness adds nothing
 CORROBORATION_CAP = 3
 
-#: seed strength for a fact that directly mentions a seeded entity, and for one
-#: reached only by walking further out from it
-SEED_DIRECT = 1.0
-SEED_INDIRECT = 0.5
+#: anchor strength for a fact that directly mentions a seeded entity, and for
+#: one reached only by walking further out from it
+ANCHOR_DIRECT = 1.0
+ANCHOR_INDIRECT = 0.5
+
+#: A fact the index found was not reached *through* the graph, so it is scored
+#: as one hop out rather than as zero: it has no chain, and it should not
+#: out-earn a fact whose chain the warrant can actually show.
+LEXICAL_HOPS = 1
 
 #: facts below this tier never enter a warrant. External content is
 #: attacker-influenceable by definition; it may be recorded and it may be shown
@@ -86,6 +107,19 @@ _FACT_FIELDS = (
 _PROV_FIELDS = (
     "f.id AS fid, t.text AS turn_text, t.ts AS turn_ts, t.role AS turn_role, t.sid AS turn_sid"
 )
+
+
+def _exact_entity(i: int) -> str:
+    return (
+        f"MATCH (e:{schema.ENTITY} {{corpus: $corpus, norm: $v{i}}}) RETURN e.norm AS norm"
+    )
+
+
+def _prefix_entity(i: int) -> str:
+    return (
+        f"MATCH (e:{schema.ENTITY} {{corpus: $corpus}}) "
+        f"WHERE e.norm STARTS WITH $v{i} RETURN e.norm AS norm"
+    )
 
 
 @runtime_checkable
@@ -169,12 +203,38 @@ class Warrant:
             "asked_at": self.asked_at,
             "as_of": self.as_of,
             "seeds": dict(self.seeds),
-            "evidence": [asdict(e) for e in self.evidence],
+            "evidence": [evidence_dict(e) for e in self.evidence],
             "paths_examined": self.paths_examined,
             "facts_considered": self.facts_considered,
             "quarantined_seen": self.quarantined_seen,
             "elapsed_ms": round(self.elapsed_ms, 2),
         }
+
+
+def evidence_dict(item: Evidence) -> dict[str, Any]:
+    """The wire form of one piece of evidence.
+
+    Spelled for readers rather than for the dataclass -- `fact_id`, `session`,
+    `turn_index` -- because this shape crosses into the HTTP API, the CLI and the
+    MCP surface, and those are read by people who have never seen `Evidence`.
+    """
+    return {
+        "fact_id": item.fid,
+        "text": item.text,
+        "tier": item.tier,
+        "status": item.status,
+        "valid_from": item.valid_from,
+        "valid_to": item.valid_to,
+        "session": item.sid,
+        "session_index": item.sidx,
+        "turn_index": item.tidx,
+        "turn_text": item.turn_text,
+        "turn_ts": item.turn_ts,
+        "score": item.score,
+        "hops": item.hops,
+        "path": list(item.path),
+        "superseded_by": item.superseded_by,
+    }
 
 
 ROUTE_ENTITY = "entity"
@@ -187,43 +247,46 @@ class _Candidate:
 
     fid: int
     props: dict[str, Any] = field(default_factory=dict)
-    #: shortest distance from any seed; -1 until the fact has been reached
+    #: distance along the shortest traversal that reached it; -1 if none did
     hops: int = -1
-    #: shortest distance along an actual traversal, which is what `path` describes
-    graph_hops: int = -1
+    #: the chain that traversal walked, or the marker for an index-only hit
     path: list[str] = field(default_factory=list)
-    seed: float = 0.0
+    #: how strongly the graph anchors this fact to the question's entities
+    anchor: float = 0.0
+    #: how well the index matched it against this question, 0..1
+    lexical: float = 0.0
     routes: set[str] = field(default_factory=set)
 
-    def reached(self, *, hops: int, path: list[str], seed: float, route: str) -> None:
-        """Fold in one more way of arriving at this fact.
-
-        A fact found both by name and by traversal keeps the traversal's chain
-        even though the lexical hit is nearer: "distance zero, matched the
-        index" is the right number for ranking and the wrong story for the
-        person asking why the fact is in their warrant.
-        """
+    def by_graph(self, *, hops: int, path: list[str], anchor: float) -> None:
+        """Record arriving here along a path from an entity seed."""
         if self.hops < 0 or hops < self.hops:
             self.hops = hops
-        if route == ROUTE_ENTITY:
-            if self.graph_hops < 0 or hops < self.graph_hops:
-                self.graph_hops = hops
-                self.path = path
-        elif not self.path:
             self.path = path
-        self.seed = max(self.seed, seed)
-        self.routes.add(route)
+        self.anchor = max(self.anchor, anchor)
+        self.routes.add(ROUTE_ENTITY)
+
+    def by_index(self, score: float) -> None:
+        """Record the index matching this fact's own text.
+
+        The chain is only set if nothing else supplied one: a fact found both
+        ways keeps its traversal chain, because "matched the index" is a true
+        statement about the retrieval and a useless one to show the person
+        asking why the fact is in their warrant.
+        """
+        self.lexical = max(self.lexical, score)
+        if not self.path:
+            self.path = ["lexical index"]
+        self.routes.add(ROUTE_LEXICAL)
 
     def absorb(self, other: "_Candidate") -> None:
         """Merge a candidate that resolved onto the same fact as this one."""
         if other.hops >= 0 and (self.hops < 0 or other.hops < self.hops):
             self.hops = other.hops
-        if other.graph_hops >= 0 and (self.graph_hops < 0 or other.graph_hops < self.graph_hops):
-            self.graph_hops = other.graph_hops
             self.path = other.path
         elif not self.path:
             self.path = other.path
-        self.seed = max(self.seed, other.seed)
+        self.anchor = max(self.anchor, other.anchor)
+        self.lexical = max(self.lexical, other.lexical)
         self.routes |= other.routes
 
 
@@ -258,13 +321,14 @@ class Retriever:
         """Entity keys and lexical terms the question resolves to.
 
         The heuristic runs first and always; a model, if one is configured, only
-        prepends candidates to it. Order matters because the entity match is
+        adds to what it produced. Order matters because the entity match is
         capped, and a phrase the question actually contains is a better bet than
-        one a model inferred.
+        one a model inferred - so the model's candidates go on the end, where
+        they widen recall without displacing anything.
         """
         terms = self._phrases(question)
         proposed = self._model_terms(question)
-        candidates = _dedupe([*proposed, *terms])
+        candidates = _dedupe([*terms, *proposed])
         entities = self._match_entities(candidates)
         return {"entities": entities, "terms": candidates[: self.settings.seed_lexical]}
 
@@ -341,23 +405,20 @@ class Retriever:
             return []
 
         limit = max(1, self.settings.seed_entities)
-        exact = self._entity_pass(wanted, "e.norm = $v{i}")
+        exact = self._entity_pass(wanted, _exact_entity)
         prefix = self._entity_pass(
-            [c for c in wanted if len(c) >= PREFIX_MIN], "e.norm STARTS WITH $v{i}"
+            [c for c in wanted if len(c) >= PREFIX_MIN], _prefix_entity
         )
         return _dedupe([*exact, *prefix])[:limit]
 
-    def _entity_pass(self, terms: Sequence[str], predicate: str) -> list[str]:
+    def _entity_pass(self, terms: Sequence[str], arm: Callable[[int], str]) -> list[str]:
         found: list[str] = []
         for chunk in _chunks(terms, SEED_ARMS):
-            arms: list[str] = []
             params: dict[str, Any] = {"corpus": self.corpus}
+            arms: list[str] = []
             for i, term in enumerate(chunk):
                 params[f"v{i}"] = term
-                arms.append(
-                    f"MATCH (e:{schema.ENTITY}) WHERE e.corpus = $corpus "
-                    f"AND {predicate.format(i=i)} RETURN e.norm AS norm"
-                )
+                arms.append(arm(i))
             for row in self.client.run(" UNION ".join(arms), **params):
                 norm = str(row.get("norm") or "")
                 if norm:
@@ -461,14 +522,12 @@ class Retriever:
             fid = _vertex_id(node)
             if fid is None:
                 continue
-            seed = SEED_DIRECT if i <= 1 else SEED_INDIRECT
             entry = candidates.setdefault(fid, _Candidate(fid=fid))
             entry.props = entry.props or props[i]
-            entry.reached(
+            entry.by_graph(
                 hops=i,
                 path=_readable(labels[: i + 1], props[: i + 1], rels[:i]),
-                seed=seed,
-                route=ROUTE_ENTITY,
+                anchor=ANCHOR_DIRECT if i <= 1 else ANCHOR_INDIRECT,
             )
 
         # a DERIVED_FROM edge on the path already carries the turn, so the
@@ -489,10 +548,7 @@ class Retriever:
         if self.index is None or not len(self.index):
             return
         for fid, score in self.index.search(question, self.settings.seed_lexical):
-            entry = candidates.setdefault(int(fid), _Candidate(fid=int(fid)))
-            entry.reached(
-                hops=0, path=["lexical index"], seed=float(score), route=ROUTE_LEXICAL
-            )
+            candidates.setdefault(int(fid), _Candidate(fid=int(fid))).by_index(float(score))
 
     def _hydrate(self, candidates: dict[int, _Candidate]) -> None:
         """Fill in properties for candidates that arrived without them."""
@@ -514,7 +570,7 @@ class Retriever:
             for i, fid in enumerate(chunk):
                 params[f"p{i}"] = int(fid)
                 arms.append(
-                    f"MATCH (f:{schema.FACT}) WHERE f.id = $p{i} RETURN {_FACT_FIELDS}"
+                    f"MATCH (f:{schema.FACT} {{id: $p{i}}}) RETURN {_FACT_FIELDS}"
                 )
             for row in self.client.run(" UNION ".join(arms), **params):
                 if row.get("id") is not None:
@@ -557,9 +613,9 @@ class Retriever:
                     fid=target,
                     props=dict(props.get(target) or cand.props),
                     hops=cand.hops,
-                    graph_hops=cand.graph_hops,
                     path=[*cand.path, schema.SUPERSEDES, f"Fact:{target}"],
-                    seed=cand.seed,
+                    anchor=cand.anchor,
+                    lexical=cand.lexical,
                     routes=set(cand.routes),
                 )
             existing = selected.get(cand.fid)
@@ -585,8 +641,9 @@ class Retriever:
     def _supersession(self) -> tuple[dict[int, int], dict[int, int]]:
         """``{displaced: replacement}`` and its inverse, for this corpus."""
         rows = self.client.run(
-            f"MATCH (a:{schema.FACT})-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) "
-            "WHERE a.corpus = $corpus RETURN a.id AS newer, b.id AS older",
+            f"MATCH (a:{schema.FACT} {{corpus: $corpus}})"
+            f"-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) "
+            "RETURN a.id AS newer, b.id AS older",
             corpus=self.corpus,
         )
         newer: dict[int, int] = {}
@@ -601,7 +658,12 @@ class Retriever:
     # ------------------------------------------------------------------ ranking
 
     def _rank(self, candidates: Sequence[_Candidate]) -> list[Evidence]:
-        """Blend seed strength, proximity, tier, corroboration and recency."""
+        """Blend lexical match, anchoring, proximity, tier, corroboration, recency.
+
+        Recency is a *rank* within the candidate set rather than an absolute age,
+        which keeps the term meaningful whether the corpus spans a week or a
+        decade and stops a single very old fact flattening everything else.
+        """
         if not candidates:
             return []
 
@@ -613,12 +675,14 @@ class Retriever:
         out: list[Evidence] = []
         for cand in candidates:
             props = cand.props
-            proximity = 1.0 / (1.0 + max(0, cand.hops))
+            distance = cand.hops if cand.hops >= 0 else LEXICAL_HOPS
+            proximity = 1.0 / (1.0 + distance)
             tier = int(props.get("rank") or 0) / int(Tier.OWNER)
             corr = min(corroboration.get(cand.fid, 0), CORROBORATION_CAP) / CORROBORATION_CAP
             recency = recency_of.get(int(props.get("vfrom") or 0), 0.0)
             score = (
-                W_SEED * min(1.0, cand.seed)
+                W_LEXICAL * min(1.0, cand.lexical)
+                + W_ANCHOR * min(1.0, cand.anchor)
                 + W_PROXIMITY * proximity
                 + W_TIER * tier
                 + W_CORROBORATION * corr
@@ -636,7 +700,7 @@ class Retriever:
                     sidx=int(props.get("sidx") or 0),
                     tidx=int(props.get("tidx") or 0),
                     score=round(score, 6),
-                    hops=int(cand.hops),
+                    hops=max(0, int(cand.hops)),
                     path=list(cand.path),
                     superseded_by=props.get("superseded_by"),
                 )
@@ -652,8 +716,9 @@ class Retriever:
         """
         counts: dict[int, int] = {}
         rows = self.client.run(
-            f"MATCH (a:{schema.FACT})-[:{schema.CORROBORATES}]->(b:{schema.FACT}) "
-            "WHERE a.corpus = $corpus RETURN a.id AS src, b.id AS dst",
+            f"MATCH (a:{schema.FACT} {{corpus: $corpus}})"
+            f"-[:{schema.CORROBORATES}]->(b:{schema.FACT}) "
+            "RETURN a.id AS src, b.id AS dst",
             corpus=self.corpus,
         )
         for row in rows:
@@ -687,8 +752,8 @@ class Retriever:
             for i, fid in enumerate(chunk):
                 params[f"p{i}"] = int(fid)
                 arms.append(
-                    f"MATCH (f:{schema.FACT})-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) "
-                    f"WHERE f.id = $p{i} RETURN {_PROV_FIELDS}"
+                    f"MATCH (f:{schema.FACT} {{id: $p{i}}})"
+                    f"-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) RETURN {_PROV_FIELDS}"
                 )
             for row in self.client.run(" UNION ".join(arms), **params):
                 if row.get("fid") is not None:

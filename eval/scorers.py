@@ -109,6 +109,29 @@ def _dates(text: str) -> set[str]:
     return found
 
 
+#: LongMemEval gold answers routinely name alternatives -- "14 days. 15 days
+#: (including the last day) is also acceptable." Treating that whole string as
+#: one required phrase makes a perfectly correct "14 days" score as wrong, so the
+#: gold is also split on sentence and alternative boundaries and any part may
+#: satisfy the match.
+_ALTERNATIVE = re.compile(r"(?:\.\s+|;\s*|\s+\bor\b\s+|\s*/\s*|,\s+(?=which|also\b))")
+
+
+def gold_alternatives(gold: str) -> list[str]:
+    """The whole gold answer, then each part that could stand as an answer."""
+    whole = (gold or "").strip()
+    if not whole:
+        return []
+    parts = [p.strip(" .") for p in _ALTERNATIVE.split(whole)]
+    seen: list[str] = []
+    for candidate in [whole, *parts]:
+        # a one-character gold such as "7" is a perfectly good answer, so the
+        # filter is "normalises to something" rather than a minimum length
+        if candidate and normalize_text(candidate) and candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
 def contains_answer(prediction: str, gold: str) -> bool:
     """Whether ``gold`` appears in ``prediction`` after normalisation.
 
@@ -162,6 +185,26 @@ _ABSTENTION_MARKERS = (
     "isnt anything in",
     "there is nothing in",
     "no supporting",
+    # the phrasings a long-context model actually reaches for; each of these was
+    # observed in a real run being scored as a confident answer before it was added
+    "insufficient evidence",
+    "does not contain",
+    "doesnt contain",
+    "do not contain",
+    "dont contain",
+    "does not include",
+    "doesnt include",
+    "does not mention",
+    "doesnt mention",
+    "does not specify",
+    "doesnt specify",
+    "not specified",
+    "is not provided",
+    "was not provided",
+    "no details about",
+    "no details on",
+    "does not appear",
+    "doesnt appear",
     "cannot answer",
     "cant answer",
     "unable to answer",
@@ -368,21 +411,23 @@ def fallback_judge(
     if looks_like_abstention(prediction):
         return Judgement(False, "declined to answer an answerable question", method)
 
-    if contains_answer(prediction, gold):
-        return Judgement(True, "gold answer appears in the prediction", method)
+    pred_numbers, pred_dates = _numbers(prediction), _dates(prediction)
+    pred_tokens = set(normalize_text(prediction).split())
 
-    gold_numbers, gold_dates = _numbers(gold), _dates(gold)
-    if gold_numbers or gold_dates:
-        pred_numbers, pred_dates = _numbers(prediction), _dates(prediction)
-        numbers_ok = not gold_numbers or gold_numbers <= pred_numbers
-        dates_ok = not gold_dates or bool(gold_dates & pred_dates)
-        if numbers_ok and dates_ok:
+    for alternative in gold_alternatives(gold):
+        if contains_answer(prediction, alternative):
+            return Judgement(True, "gold answer appears in the prediction", method)
+
+        numbers, dates = _numbers(alternative), _dates(alternative)
+        if (numbers or dates) and (not numbers or numbers <= pred_numbers) and (
+            not dates or dates & pred_dates
+        ):
             return Judgement(True, "numeric/date values agree", method)
 
-    gold_tokens = set(normalize_text(gold).split())
-    pred_tokens = set(normalize_text(prediction).split())
-    if gold_tokens and len(gold_tokens & pred_tokens) / len(gold_tokens) >= 0.85:
-        return Judgement(True, "near-complete token overlap with the gold answer", method)
+        tokens = set(normalize_text(alternative).split())
+        if tokens and len(tokens & pred_tokens) / len(tokens) >= 0.85:
+            return Judgement(True, "near-complete token overlap with the gold answer", method)
+
     return Judgement(False, "no containment, numeric or date match", method)
 
 

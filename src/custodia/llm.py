@@ -10,9 +10,14 @@ Three decisions here are load-bearing rather than incidental:
   ingest is free, and shipping a populated cache is what lets the demo run end
   to end with no credentials at all. ``cache_only`` turns a miss into a failure
   instead of a surprise bill.
-* **The transport is injectable.** Retry, caching and JSON repair are the parts
-  of this module worth testing and none of them should need a network to test.
-  The default transport is httpx; tests pass a callable.
+* **The transport is injectable.** Retry, caching, pacing and JSON repair are the
+  parts of this module worth testing and none of them should need a network to
+  test. The default transport is httpx; tests pass a callable.
+* **Outbound calls are paced client-side.** The provider meters us, and a 429 the
+  retries cannot outlast arrives at the gate as "no evidence" - so an unpaced run
+  measures the rate limiter instead of the product. A token bucket sits in front
+  of the transport, and ``usage()`` reports what it cost, because a throttled run
+  has to be reported as one.
 * **Every failure collapses into one exception.** A provider error, a timeout,
   unparseable JSON and a miss under ``cache_only`` all raise
   :class:`LLMUnavailable`, because everything upstream treats them identically:
@@ -30,9 +35,11 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
@@ -46,6 +53,9 @@ RETRY_BASE_DELAY = 0.75
 
 #: how much of an unparseable reply is echoed back in the repair turn
 REPAIR_ECHO = 4000
+
+#: a provider is allowed to ask us to wait, but not to hang the run
+MAX_RETRY_AFTER = 60.0
 
 
 class LLMUnavailable(RuntimeError):
@@ -69,6 +79,7 @@ class LLMRequest:
 class LLMResponse:
     status: int
     body: Any
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 Transport = Callable[[LLMRequest], LLMResponse]
@@ -129,10 +140,82 @@ def _httpx_transport(timeout: float) -> Transport:
             body: Any = response.json()
         except ValueError:
             body = response.text
-        return LLMResponse(response.status_code, body)
+        return LLMResponse(response.status_code, body, dict(response.headers))
 
     send.close = client.close  # type: ignore[attr-defined]
     return send
+
+
+def _wait(seconds: float) -> None:
+    """The one place this module blocks, so a test can drive it without waiting."""
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def _retry_after(headers: Mapping[str, str], fallback: float) -> float:
+    """Seconds the provider asked us to wait, in either form the RFC allows."""
+    raw = ""
+    for name, value in headers.items():
+        if name.lower() == "retry-after":
+            raw = str(value).strip()
+            break
+    if not raw:
+        return fallback
+    try:
+        seconds = float(raw)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return fallback
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    return max(0.0, min(seconds, MAX_RETRY_AFTER))
+
+
+class TokenBucket:
+    """Requests per minute, shared by every thread on one client.
+
+    A bucket rather than a fixed delay because the traffic is bursty by nature:
+    a batch of extraction windows arrives all at once, and the first few should
+    go straight out. A caller that finds the bucket empty reserves its permit
+    before sleeping, so concurrent callers queue in order instead of waking up
+    together and colliding again.
+    """
+
+    def __init__(
+        self,
+        per_minute: float,
+        *,
+        burst: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = _wait,
+    ) -> None:
+        self.rate = max(0.0, per_minute) / 60.0
+        self.capacity = burst if burst is not None else max(1.0, min(per_minute / 10.0, 10.0))
+        self._tokens = self.capacity
+        self._clock = clock
+        self._sleep = sleep
+        self._updated = clock()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> float:
+        """Take one permit, blocking if there is none. Returns seconds waited."""
+        if self.rate <= 0:
+            return 0.0
+        with self._lock:
+            now = self._clock()
+            self._tokens = min(self.capacity, self._tokens + (now - self._updated) * self.rate)
+            self._updated = now
+            deficit = 1.0 - self._tokens
+            # the permit is taken either way; a negative balance is the queue
+            self._tokens -= 1.0
+        if deficit <= 0:
+            return 0.0
+        pause = deficit / self.rate
+        self._sleep(pause)
+        return pause
 
 
 def _excerpt(body: Any, limit: int = 300) -> str:
@@ -217,7 +300,16 @@ class LLM:
         # harnesses drive the live path without a key on the machine
         self._injected = transport is not None
         self._lock = threading.Lock()
-        self._usage = {"calls": 0, "cached": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        #: one limiter per client, shared by every thread `batch_json` starts
+        self.limiter = TokenBucket(self.settings.llm_rpm)
+        self._usage = {
+            "calls": 0,
+            "cached": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "throttled": 0,
+            "waited_ms": 0,
+        }
 
     # ------------------------------------------------------------------ state
 
@@ -229,6 +321,14 @@ class LLM:
         return self._injected or bool(self.settings.llm_api_key)
 
     def usage(self) -> dict[str, int]:
+        """Running totals for the run.
+
+        ``waited_ms`` counts every millisecond spent *not* sending - client-side
+        pacing and a provider's own ``Retry-After`` alike - and ``throttled``
+        counts the 429s behind it. A report that omits them can describe a run
+        that spent half its wall clock queueing as if it were a measurement of
+        the system.
+        """
         with self._lock:
             return dict(self._usage)
 
@@ -361,6 +461,9 @@ class LLM:
         attempts = max(1, int(self.settings.llm_retries))
         reason = "no attempt made"
         for attempt in range(attempts):
+            pause = RETRY_BASE_DELAY * (2**attempt)
+            # every attempt is a request against the quota, retries included
+            self._paced()
             try:
                 response = self._send(request)
             except (LLMTransportError, TimeoutError, OSError) as exc:
@@ -371,12 +474,23 @@ class LLM:
                         return response.body
                     raise LLMUnavailable(f"non-JSON response body: {_excerpt(response.body)}")
                 reason = f"http {response.status}: {_excerpt(response.body)}"
-                # only rate limiting and server faults are worth repeating
-                if response.status != 429 and response.status < 500:
+                if response.status == 429:
+                    # being metered is ordinary operation, not a fault: the
+                    # provider is telling us the pace, so take the pace it gives
+                    self._count("throttled", 1)
+                    pause = _retry_after(response.headers, pause)
+                    log.debug("rate limited, pausing %.2fs before retry %d", pause, attempt + 1)
+                elif response.status < 500:
                     raise LLMUnavailable(reason)
             if attempt + 1 < attempts:
-                time.sleep(RETRY_BASE_DELAY * (2**attempt))
+                self._count("waited_ms", int(pause * 1000))
+                _wait(pause)
         raise LLMUnavailable(f"provider unavailable after {attempts} attempts - {reason}")
+
+    def _paced(self) -> None:
+        waited = self.limiter.acquire()
+        if waited:
+            self._count("waited_ms", int(waited * 1000))
 
     def _send(self, request: LLMRequest) -> LLMResponse:
         if self._transport is None:
@@ -440,6 +554,10 @@ class LLM:
             os.replace(tmp, path)
         except OSError as exc:
             log.warning("could not cache completion %s: %s", key[:12], exc)
+
+    def _count(self, name: str, amount: int) -> None:
+        with self._lock:
+            self._usage[name] += amount
 
     def _record(self, completion: Completion, *, cached: bool) -> None:
         with self._lock:

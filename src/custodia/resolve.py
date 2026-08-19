@@ -6,13 +6,20 @@ The first is deciding when two strings name the same thing, because the graph
 anchors retrieval on ``Entity.norm`` and a seed that misses by an article or a
 possessive finds nothing. The normalisation is deliberately blunt and
 deterministic -- no model, no embedding, no network -- so the same corpus always
-produces the same entity keys and therefore the same vertex ids.
+produces the same entity keys and therefore the same vertex ids. On top of that
+sits :func:`fold_aliases`, which handles the drift a long conversation always
+has: someone introduces themselves in full in January and is on first-name terms
+by March, and unless the two spellings become one key nothing they said in
+January ever reconciles with anything they said afterwards.
 
 The second is deciding what a new claim does to the claims already held. "My gym
 is Ironworks" followed by "I switched to Fitwell" is a supersession; "I go to
 Ironworks" said twice in different sessions is corroboration; "I own a bike" and
 "I own a car" are neither, because ``owns`` is not a single-valued predicate and
-treating it as one silently deletes memory.
+treating it as one silently deletes memory. Which predicates replace their value
+and which accumulate is not decided here: it comes from the shared vocabulary in
+:mod:`custodia.schema`, so the extractor, the writer and the retriever cannot
+disagree about it.
 
 The rule that matters most is the one that refuses. A supersession is a *write
 against an existing fact*, so it goes through :class:`~custodia.policy.Policy`
@@ -33,6 +40,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from custodia import schema
 from custodia.policy import Decision, Policy
 from custodia.schema import QUARANTINED, SUPERSEDED, Fact
 
@@ -117,6 +125,120 @@ def resolve_entities(
     return resolved
 
 
+# --------------------------------------------------------------------------- #
+# alias folding
+# --------------------------------------------------------------------------- #
+
+#: lowercase particles that legitimately sit inside a proper name
+_NAME_PARTICLES = frozenset({"de", "da", "do", "dos", "das", "del", "della", "di",
+                             "van", "von", "der", "den", "la", "le", "el", "bin",
+                             "al", "of", "and"})
+
+#: longest key we will treat as one person or place
+_MAX_ALIAS_TOKENS = 4
+
+
+def _looks_like_a_proper_name(display: str) -> bool:
+    """A blunt test for "this is a name, not a noun phrase".
+
+    ``Nora Salgado`` and ``Alfama, Lisbon`` pass; ``coffee shop`` and ``the
+    14-inch macbook pro`` do not. It exists so that folding a longer key onto a
+    shorter one only ever happens between things that are plausibly the same
+    named entity written two ways.
+    """
+    tokens = [t for t in re.split(r"[\s,]+", display.strip()) if t]
+    if not tokens:
+        return False
+    for token in tokens:
+        if token.casefold() in _NAME_PARTICLES:
+            continue
+        first = token[0]
+        if not first.isalpha() or first != first.upper():
+            return False
+    return True
+
+
+def fold_aliases(
+    entities: Iterable[str] | dict[str, str],
+    *,
+    aliases: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Map spellings of one entity onto the key the corpus should use for it.
+
+    Conversations drift: someone introduces themselves as *Nora Salgado* in
+    January and is *Nora* by March, and the two never reconcile because they are
+    two vertices. This folds the longer key onto the shorter one when the
+    shorter one is a leading token of it and **nothing else competes for it** --
+    with both ``nora salgado`` and ``nora costa`` present, neither folds, because
+    merging two people is a worse failure than leaving one person split.
+
+    Pass ``entities`` as a ``{key: display}`` mapping to get the proper-name
+    guard, which is what keeps ``coffee shop`` from folding onto ``coffee``.
+    ``aliases`` pins pairs explicitly and always wins over anything inferred.
+
+    Returns only the keys that move; identity mappings are left out.
+    """
+    display: dict[str, str] = {}
+    if isinstance(entities, dict):
+        for raw_key, raw_display in entities.items():
+            key = normalize_entity(raw_key)
+            if key:
+                display[key] = str(raw_display or raw_key)
+        guarded = True
+    else:
+        for raw_key in entities:
+            key = normalize_entity(raw_key)
+            if key:
+                display.setdefault(key, key)
+        guarded = False
+
+    keys = set(display)
+    folded: dict[str, str] = {}
+
+    for source, target in (aliases or {}).items():
+        src, dst = normalize_entity(source), normalize_entity(target)
+        if src and dst and src != dst:
+            folded[src] = dst
+
+    # a key -> every longer key that would fold onto it
+    contenders: dict[str, list[str]] = {}
+    for key in sorted(keys):
+        if key in folded:
+            continue
+        tokens = key.split()
+        if not 1 < len(tokens) <= _MAX_ALIAS_TOKENS:
+            continue
+        if guarded and not _looks_like_a_proper_name(display[key]):
+            continue
+        for cut in range(len(tokens) - 1, 0, -1):
+            head = " ".join(tokens[:cut])
+            if head in keys and head != key:
+                if guarded and not _looks_like_a_proper_name(display[head]):
+                    break
+                contenders.setdefault(head, []).append(key)
+                break
+
+    for head, longer in contenders.items():
+        if len(longer) == 1:
+            folded[longer[0]] = head
+
+    return _resolve_chains(folded)
+
+
+def _resolve_chains(mapping: dict[str, str]) -> dict[str, str]:
+    """Collapse ``a -> b -> c`` to ``a -> c``, and drop anything that loops."""
+    resolved: dict[str, str] = {}
+    for source in mapping:
+        target = mapping[source]
+        seen = {source}
+        while target in mapping and target not in seen:
+            seen.add(target)
+            target = mapping[target]
+        if target != source:
+            resolved[source] = target
+    return resolved
+
+
 def canonical_key(subject: str, predicate: str, object: str) -> str:
     """The dedupe key a ``Fact`` is identified by within a corpus.
 
@@ -131,9 +253,11 @@ def canonical_key(subject: str, predicate: str, object: str) -> str:
 # predicate arity
 # --------------------------------------------------------------------------- #
 
-#: Predicates that can only hold one value at a time. Kept small and explicit:
-#: a predicate wrongly listed here makes memory forget things, so the default
-#: for anything unrecognised is multi-valued.
+#: Fallback patterns for predicates outside :data:`custodia.schema.PREDICATES`.
+#: The shared vocabulary decides first and always; these only catch free-form
+#: slots an extractor invented. Kept small and explicit, because a predicate
+#: wrongly treated as single-valued makes memory forget things, which is why
+#: anything unrecognised stays multi-valued.
 SINGLE_VALUED_PATTERNS: tuple[str, ...] = (
     r"(?:is|was|are|equals|resolves_to)",
     r"(?:has_)?(?:name|full_name|first_name|last_name|nickname|username|handle)",
@@ -147,8 +271,8 @@ SINGLE_VALUED_PATTERNS: tuple[str, ...] = (
     r"(?:current|primary|main|preferred|favorite|favourite|default|usual)_\w+",
 )
 
-#: Predicates that are naturally many-to-one and must never supersede. Listed
-#: explicitly rather than left to the default so the intent is testable.
+#: Free-form predicates that are naturally many-to-one and must never supersede.
+#: Listed explicitly rather than left to the default so the intent is testable.
 MULTI_VALUED: frozenset[str] = frozenset(
     {
         "owns", "own", "owned", "visited", "visits", "knows", "know", "likes",
@@ -164,9 +288,20 @@ _SINGLE_VALUED = re.compile("|".join(f"(?:{p})" for p in SINGLE_VALUED_PATTERNS)
 
 
 def is_single_valued(predicate: str) -> bool:
-    """True when a newer value for this predicate replaces the older one."""
+    """True when a newer value for this predicate replaces the older one.
+
+    The shared vocabulary in :mod:`custodia.schema` decides for every slot it
+    defines -- extractor, writer and retriever have to agree on arity or the
+    same corpus reconciles differently depending on who asked. The patterns
+    below are consulted only for free-form predicates the vocabulary does not
+    cover, and anything they do not recognise stays multi-valued.
+    """
     key = normalize_predicate(predicate)
-    if not key or key in MULTI_VALUED:
+    if not key:
+        return False
+    if key in schema.PREDICATES:
+        return schema.is_single_valued(key)
+    if key in MULTI_VALUED:
         return False
     return _SINGLE_VALUED.fullmatch(key) is not None
 
@@ -275,7 +410,11 @@ def reconcile(
         if held is None:
             pool[fact.key] = fact
         elif held is not fact:
-            _absorb(held, fact)
+            # the earlier assertion survives as the vertex, whichever order the
+            # caller handed them over in
+            keeper, duplicate = (held, fact) if _order(held) <= _order(fact) else (fact, held)
+            _absorb(keeper, duplicate)
+            pool[fact.key] = keeper
 
     groups: dict[tuple[str, str], list[Fact]] = {}
     for fact in pool.values():

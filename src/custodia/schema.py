@@ -151,8 +151,9 @@ PREDICATES: dict[str, str] = {
     "medical_condition": "multi",
     "medication": "multi",
     # preference
+    # one slot for "the thing they always order", because two slots for the
+    # same idea is how a supersession gets missed
     "usual_order": "single",
-    "preferred_drink": "single",
     "preferred_food": "multi",
     "preferred_time": "single",
     "preferred_place": "single",

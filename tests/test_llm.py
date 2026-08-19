@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from typing import Any
 
 import pytest
 
 from custodia import llm as llm_module
 from custodia.config import Settings
-from custodia.llm import LLM, LLMResponse, LLMTransportError, LLMUnavailable
+from custodia.llm import (
+    LLM,
+    LLMResponse,
+    LLMTransportError,
+    LLMUnavailable,
+    TokenBucket,
+)
 from custodia.prompts import JSON_REPAIR
 
 
@@ -27,6 +35,8 @@ def make_settings(tmp_path, **overrides: Any) -> Settings:
     cfg.llm_timeout = 5.0
     cfg.llm_retries = 3
     cfg.llm_concurrency = 4
+    # pinned so a local .env can never make the suite sleep for real
+    cfg.llm_rpm = 6000.0
     cfg.extract_model = "test/model"
     for key, value in overrides.items():
         setattr(cfg, key, value)
@@ -243,6 +253,124 @@ def test_batch_of_nothing_is_nothing(tmp_path):
     assert client.batch_json([]) == []
 
 
+# ---- pacing --------------------------------------------------------------- #
+
+
+class Clock:
+    """A hand-driven clock: sleeping advances it, nothing else does."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def tick(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_the_bucket_lets_a_burst_through_then_paces():
+    clock = Clock()
+    bucket = TokenBucket(60.0, burst=3, clock=lambda: clock.now, sleep=clock.sleep)
+
+    assert [bucket.acquire() for _ in range(3)] == [0.0, 0.0, 0.0]
+    assert bucket.acquire() == pytest.approx(1.0)
+    assert bucket.acquire() == pytest.approx(1.0)
+    assert clock.slept == [1.0, 1.0]
+
+
+def test_the_bucket_refills_over_time():
+    clock = Clock()
+    bucket = TokenBucket(60.0, burst=1, clock=lambda: clock.now, sleep=clock.sleep)
+
+    assert bucket.acquire() == 0.0
+    clock.tick(5.0)
+    assert bucket.acquire() == 0.0
+    assert clock.slept == []
+
+
+def test_pacing_can_be_switched_off():
+    bucket = TokenBucket(0.0, sleep=lambda s: pytest.fail("must not sleep"))
+    assert [bucket.acquire() for _ in range(50)] == [0.0] * 50
+
+
+def test_the_limiter_paces_live_calls_but_not_cache_hits(tmp_path):
+    transport = Recorder(LLMResponse(200, body("paced")))
+    client = LLM(make_settings(tmp_path), transport=transport)
+    clock = Clock()
+    client.limiter = TokenBucket(60.0, burst=1, clock=lambda: clock.now, sleep=clock.sleep)
+
+    client.chat(HELLO)
+    client.chat([{"role": "user", "content": "second"}])
+    client.chat(HELLO)  # cached: never leaves the process, never takes a permit
+
+    assert clock.slept == [pytest.approx(1.0)]
+    assert client.usage()["waited_ms"] == 1000
+    assert client.usage()["cached"] == 1
+
+
+def test_the_rpm_setting_drives_the_limiter(tmp_path):
+    paced = LLM(make_settings(tmp_path, llm_rpm=120.0))
+    assert paced.limiter.rate == pytest.approx(2.0)
+
+    off = LLM(make_settings(tmp_path, llm_rpm=0.0))
+    assert off.limiter.acquire() == 0.0
+
+
+# ---- throttling ----------------------------------------------------------- #
+
+
+def test_retry_after_beats_the_backoff(tmp_path, monkeypatch):
+    paused: list[float] = []
+    monkeypatch.setattr(llm_module, "_wait", paused.append)
+    transport = Recorder(
+        LLMResponse(429, {"error": "slow down"}, {"Retry-After": "7"}),
+        LLMResponse(200, body("after the wait")),
+    )
+    client = LLM(make_settings(tmp_path), transport=transport)
+
+    assert client.chat(HELLO).text == "after the wait"
+    assert paused == [7.0]
+    assert client.usage()["throttled"] == 1
+    assert client.usage()["waited_ms"] == 7000
+
+
+def test_a_retry_after_date_is_understood(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm_module, "_wait", lambda s: None)
+    when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=12))
+    transport = Recorder(
+        LLMResponse(429, {"error": "slow down"}, {"retry-after": when}),
+        LLMResponse(200, body("ok")),
+    )
+    client = LLM(make_settings(tmp_path), transport=transport)
+
+    client.chat(HELLO)
+    assert 9_000 <= client.usage()["waited_ms"] <= 13_000
+
+
+def test_a_hostile_retry_after_cannot_hang_the_run(tmp_path, monkeypatch):
+    paused: list[float] = []
+    monkeypatch.setattr(llm_module, "_wait", paused.append)
+    transport = Recorder(
+        LLMResponse(429, {"error": "go away"}, {"Retry-After": "86400"}),
+        LLMResponse(200, body("ok")),
+    )
+    client = LLM(make_settings(tmp_path), transport=transport)
+
+    client.chat(HELLO)
+    assert paused == [llm_module.MAX_RETRY_AFTER]
+
+
+def test_a_429_without_a_header_falls_back_to_the_backoff(tmp_path):
+    transport = Recorder(LLMResponse(429, {"error": "slow down"}), LLMResponse(200, body("ok")))
+    client = LLM(make_settings(tmp_path), transport=transport)
+
+    assert client.chat(HELLO).text == "ok"
+    assert client.usage()["throttled"] == 1
+
+
 def test_usage_counts_calls_hits_and_tokens(tmp_path):
     transport = Recorder(LLMResponse(200, body("a", prompt=11, completion=7)))
     client = LLM(make_settings(tmp_path), transport=transport)
@@ -256,4 +384,6 @@ def test_usage_counts_calls_hits_and_tokens(tmp_path):
         "cached": 1,
         "prompt_tokens": 22,
         "completion_tokens": 14,
+        "throttled": 0,
+        "waited_ms": 0,
     }

@@ -124,3 +124,19 @@ custodia ask "Is Nora allergic to anything?"
 The memory is intact, and the answer still cites the January session it came
 from. `custodia audit` re-checks the provenance invariant against the recovered
 graph.
+
+## One integration note worth writing down
+
+The Bolt driver treats `neo4j://` and `bolt://` differently, and with HydraDB the
+difference bites. `neo4j://` performs routing discovery: the driver asks the
+server where the cluster lives and then reconnects to whatever
+`GRAPH_ADVERTISED_BOLT_ADDR` says. Left at its example value of
+`127.0.0.1:7687`, every client is told to go and find the graph on its own
+loopback — so a second instance on a different port silently serves the first
+one's data, and a containerised client looks for the database inside itself.
+
+Two things follow, and both are in this repository:
+
+* connect with `bolt://` when you mean "this endpoint, directly";
+* if you do use routing, advertise an address the *client* can resolve —
+  `hydradb:7687` on a compose network, not `127.0.0.1:7687`.

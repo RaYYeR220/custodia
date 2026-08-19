@@ -25,7 +25,7 @@ os.environ.setdefault("CUSTODIA_CACHE_DIR", os.path.join(os.path.dirname(__file_
 
 
 def _graph_is_up() -> bool:
-    uri = os.environ.get("HYDRA_URI", "neo4j://127.0.0.1:7687")
+    uri = os.environ.get("HYDRA_URI", "bolt://127.0.0.1:7687")
     parsed = urlparse(uri)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 7687
