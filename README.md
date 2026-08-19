@@ -58,9 +58,11 @@ docker compose up -d
 docker compose exec api custodia verify
 ```
 
+The first `up` builds two images; after that the stack starts in seconds.
+
 `custodia verify` seeds eight months of hand-written assistant sessions, runs
 every scripted question against the live graph, and prints a pass/fail table. It
-needs no API key: the shipped response cache covers the demo corpus.
+needs no API key: the response cache the walkthrough replays is committed.
 
 The web client is at <http://localhost:3000>, the API and its OpenAPI document at
 <http://localhost:8080/docs>.

@@ -3,7 +3,7 @@
 Everything below is a command you can run or a file you can open. Nothing here
 asks you to take a claim on trust, and nothing needs an API key.
 
-## 1. Bring it up (about 60 seconds)
+## 1. Bring it up
 
 ```bash
 git clone https://github.com/RaYYeR220/custodia && cd custodia
@@ -11,10 +11,14 @@ docker compose up -d
 docker compose exec api custodia verify
 ```
 
-`custodia verify` seeds eight months of hand-written assistant sessions into
+The first `up` builds two images, so allow a few minutes for it; after that the
+stack starts in seconds.
+
+`custodia verify` then seeds eight months of hand-written assistant sessions into
 HydraDB, runs every scripted question against the live graph, checks the graph's
-own integrity, and prints a pass/fail table. The response cache for the demo
-corpus is committed, so no credentials are required.
+own integrity, and prints a pass/fail table. It takes about fifteen seconds and
+needs no credentials — the responses the walkthrough replays are committed to the
+repository.
 
 Open <http://localhost:3000> for the web client and
 <http://localhost:8080/docs> for the API.
