@@ -198,6 +198,37 @@ class _BoundCallable:
 
 
 @dataclass(slots=True)
+class _MessagesClient:
+    """Adapts a chat-completions client -- ``chat(messages, ...) -> Completion``.
+
+    This is the shape ``custodia.llm.LLM`` exposes, and binding to it directly is
+    what makes "the baselines share Custodia's model" literally true: the same
+    client, the same on-disk response cache, the same retry policy.
+    """
+
+    chat: Callable[..., Any]
+    model: str
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str = "",
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+    ) -> str:
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        completion = self.chat(
+            messages, model=self.model, temperature=temperature, max_tokens=max_tokens
+        )
+        text = getattr(completion, "text", None)
+        return text if isinstance(text, str) else str(completion)
+
+
+@dataclass(slots=True)
 class _OpenAICompatible:
     """Minimal OpenAI-compatible chat client, used only when Custodia has none.
 
@@ -263,25 +294,32 @@ def resolve_llm(model: str | None = None, *, role: str = "answer") -> LlmBinding
 
     The contract expected of ``custodia.llm`` is one of:
 
-    * a module-level ``complete(prompt, *, system, temperature, max_tokens, model)``
-      or ``chat(...)`` returning the reply text;
-    * a class ``LlmClient`` / ``LLM`` whose instances expose ``complete`` or ``chat``
-      with the same shape.
+    * a class ``LLM`` / ``LlmClient`` whose instances expose
+      ``chat(messages, *, model, temperature, max_tokens)`` returning an object
+      with ``.text`` -- this is the shape Custodia ships;
+    * a class or module-level ``complete(prompt, ...)`` returning the reply text.
     """
     config = _settings()
     default = config.answer_model if role == "answer" else config.extract_model
     chosen = model or default
+    key = getattr(config, "llm_api_key", "")
+    cache_only = bool(getattr(config, "cache_only", False))
+
+    if not key and not cache_only:
+        raise NoProviderConfigured(
+            "no provider configured: set CUSTODIA_LLM_API_KEY (and optionally "
+            "CUSTODIA_LLM_BASE_URL / CUSTODIA_ANSWER_MODEL), or set "
+            "CUSTODIA_CACHE_ONLY=1 to replay a shipped response cache"
+        )
 
     bound = _bind_custodia(chosen)
     if bound is not None:
         return bound
 
-    key = getattr(config, "llm_api_key", "")
     if not key:
         raise NoProviderConfigured(
-            "no provider configured: set CUSTODIA_LLM_API_KEY (and optionally "
-            "CUSTODIA_LLM_BASE_URL / CUSTODIA_ANSWER_MODEL), or expose a "
-            "complete()/chat() entry point from custodia.llm"
+            "custodia.llm is unavailable and CUSTODIA_CACHE_ONLY leaves nothing to "
+            "call; set CUSTODIA_LLM_API_KEY to use the harness's own transport"
         )
     client = _OpenAICompatible(
         base_url=getattr(config, "llm_base_url", "https://openrouter.ai/api/v1"),

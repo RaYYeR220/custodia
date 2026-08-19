@@ -53,7 +53,7 @@ Custodia is a memory layer where all three are structural rather than aspiration
 ## Try it
 
 ```bash
-git clone https://github.com/<owner>/custodia && cd custodia
+git clone https://github.com/RaYYeR220/custodia && cd custodia
 docker compose up -d
 docker compose exec api custodia verify
 ```

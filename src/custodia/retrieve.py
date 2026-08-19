@@ -177,24 +177,54 @@ class Warrant:
         }
 
 
+ROUTE_ENTITY = "entity"
+ROUTE_LEXICAL = "lexical"
+
+
 @dataclass(slots=True)
 class _Candidate:
-    """A fact under consideration, with how it was reached."""
+    """A fact under consideration, with every route that reached it."""
 
     fid: int
     props: dict[str, Any] = field(default_factory=dict)
-    hops: int = 0
+    #: shortest distance from any seed; -1 until the fact has been reached
+    hops: int = -1
+    #: shortest distance along an actual traversal, which is what `path` describes
+    graph_hops: int = -1
     path: list[str] = field(default_factory=list)
     seed: float = 0.0
     routes: set[str] = field(default_factory=set)
 
     def reached(self, *, hops: int, path: list[str], seed: float, route: str) -> None:
-        """Merge a second route to the same fact, keeping the strongest of each."""
-        if not self.path or hops < self.hops:
+        """Fold in one more way of arriving at this fact.
+
+        A fact found both by name and by traversal keeps the traversal's chain
+        even though the lexical hit is nearer: "distance zero, matched the
+        index" is the right number for ranking and the wrong story for the
+        person asking why the fact is in their warrant.
+        """
+        if self.hops < 0 or hops < self.hops:
             self.hops = hops
+        if route == ROUTE_ENTITY:
+            if self.graph_hops < 0 or hops < self.graph_hops:
+                self.graph_hops = hops
+                self.path = path
+        elif not self.path:
             self.path = path
         self.seed = max(self.seed, seed)
         self.routes.add(route)
+
+    def absorb(self, other: "_Candidate") -> None:
+        """Merge a candidate that resolved onto the same fact as this one."""
+        if other.hops >= 0 and (self.hops < 0 or other.hops < self.hops):
+            self.hops = other.hops
+        if other.graph_hops >= 0 and (self.graph_hops < 0 or other.graph_hops < self.graph_hops):
+            self.graph_hops = other.graph_hops
+            self.path = other.path
+        elif not self.path:
+            self.path = other.path
+        self.seed = max(self.seed, other.seed)
+        self.routes |= other.routes
 
 
 # --------------------------------------------------------------------------- #
@@ -299,36 +329,40 @@ class Retriever:
 
         Equality and ``STARTS WITH`` are the only string predicates the engine
         has, and there is no ``IN``, so this is a ``UNION`` with one arm per
-        candidate per predicate, batched to keep statements a sane size.
+        candidate, batched to keep statements a sane size.
+
+        Two passes rather than one, because ``RETURN`` takes a binding property
+        or ``count(*)`` and nothing else: there is no literal column to tag an
+        arm with, so exact matches and prefix matches are separate statements.
+        Exact wins where both hit, which is why the order of the two matters.
         """
         wanted = [c for c in candidates if c]
         if not wanted:
             return []
 
         limit = max(1, self.settings.seed_entities)
-        exact: list[str] = []
-        prefix: list[str] = []
-        for chunk in _chunks(wanted, SEED_ARMS):
+        exact = self._entity_pass(wanted, "e.norm = $v{i}")
+        prefix = self._entity_pass(
+            [c for c in wanted if len(c) >= PREFIX_MIN], "e.norm STARTS WITH $v{i}"
+        )
+        return _dedupe([*exact, *prefix])[:limit]
+
+    def _entity_pass(self, terms: Sequence[str], predicate: str) -> list[str]:
+        found: list[str] = []
+        for chunk in _chunks(terms, SEED_ARMS):
             arms: list[str] = []
             params: dict[str, Any] = {"corpus": self.corpus}
             for i, term in enumerate(chunk):
                 params[f"v{i}"] = term
                 arms.append(
-                    f"MATCH (e:{schema.ENTITY}) WHERE e.corpus = $corpus AND e.norm = $v{i} "
-                    "RETURN e.norm AS norm, 1 AS exact"
+                    f"MATCH (e:{schema.ENTITY}) WHERE e.corpus = $corpus "
+                    f"AND {predicate.format(i=i)} RETURN e.norm AS norm"
                 )
-                if len(term) >= PREFIX_MIN:
-                    arms.append(
-                        f"MATCH (e:{schema.ENTITY}) WHERE e.corpus = $corpus "
-                        f"AND e.norm STARTS WITH $v{i} RETURN e.norm AS norm, 0 AS exact"
-                    )
             for row in self.client.run(" UNION ".join(arms), **params):
                 norm = str(row.get("norm") or "")
-                if not norm:
-                    continue
-                (exact if int(row.get("exact") or 0) else prefix).append(norm)
-
-        return _dedupe([*exact, *prefix])[:limit]
+                if norm:
+                    found.append(norm)
+        return found
 
     # ---------------------------------------------------------------- expansion
 
@@ -434,7 +468,7 @@ class Retriever:
                 hops=i,
                 path=_readable(labels[: i + 1], props[: i + 1], rels[:i]),
                 seed=seed,
-                route="entity",
+                route=ROUTE_ENTITY,
             )
 
         # a DERIVED_FROM edge on the path already carries the turn, so the
@@ -456,7 +490,9 @@ class Retriever:
             return
         for fid, score in self.index.search(question, self.settings.seed_lexical):
             entry = candidates.setdefault(int(fid), _Candidate(fid=int(fid)))
-            entry.reached(hops=0, path=["lexical index"], seed=float(score), route="lexical")
+            entry.reached(
+                hops=0, path=["lexical index"], seed=float(score), route=ROUTE_LEXICAL
+            )
 
     def _hydrate(self, candidates: dict[int, _Candidate]) -> None:
         """Fill in properties for candidates that arrived without them."""
@@ -521,6 +557,7 @@ class Retriever:
                     fid=target,
                     props=dict(props.get(target) or cand.props),
                     hops=cand.hops,
+                    graph_hops=cand.graph_hops,
                     path=[*cand.path, schema.SUPERSEDES, f"Fact:{target}"],
                     seed=cand.seed,
                     routes=set(cand.routes),
@@ -529,12 +566,7 @@ class Retriever:
             if existing is None:
                 selected[cand.fid] = cand
             else:
-                existing.reached(
-                    hops=cand.hops,
-                    path=cand.path,
-                    seed=cand.seed,
-                    route=next(iter(cand.routes), "entity"),
-                )
+                existing.absorb(cand)
 
         quarantined = 0
         keep: list[_Candidate] = []

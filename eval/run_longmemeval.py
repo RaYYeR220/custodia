@@ -22,11 +22,10 @@ from __future__ import annotations
 
 import json
 import time
-import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Sequence
 
 import typer
 
@@ -262,7 +261,10 @@ class RecordStore:
             except json.JSONDecodeError:
                 continue  # a torn last line from a hard kill; drop it and move on
             self.rows.append(row)
-            self.done.add((str(row.get("qid")), str(row.get("system"))))
+            # QA records key on the question id, poison records on the case id;
+            # one store serves both so resume behaves identically in each runner
+            key = row.get("case_id") or row.get("qid")
+            self.done.add((str(key), str(row.get("system"))))
 
     def append(self, record: RunRecord) -> None:
         payload = record.as_dict()
@@ -438,8 +440,6 @@ def run(
                 record.error = f"{type(exc).__name__}: {exc}"
                 record.judge_method = "not-graded"
                 typer.secho(f"  {instance.qid} [{name}] {record.error}", fg=typer.colors.RED)
-                if "--traceback" in str(exc):  # pragma: no cover
-                    traceback.print_exc()
             store.append(record)
         typer.echo(f"[{position}/{len(instances)}] {instance.qid}")
 

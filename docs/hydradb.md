@@ -1,0 +1,126 @@
+# Building on HydraDB
+
+Notes from putting a real workload on HydraDB, kept because the engine's shape
+changed our design rather than the other way round. Measurements below are from
+`ghcr.io/hydra-db/hydradb:latest` running in Docker on a single laptop with the
+local object store, so treat them as ratios rather than as a benchmark.
+
+## What Custodia uses it for
+
+The memory graph is the whole system state: sessions, turns, facts, entities,
+the temporal edges between facts, the audit trail of what was answered, and the
+record of what was refused. There is no second store holding the truth. The only
+thing that lives outside is the BM25 index, and only because HydraDB property
+values are scalars.
+
+## The three engine facts that shaped the design
+
+### 1. Batched writes are the write path, not an optimisation
+
+A single-statement write commits to object storage and returns durable. That is
+a good property and it has a price:
+
+| write form | measured |
+|---|---|
+| one labelled `CREATE` per statement | ~12–17 rows/s |
+| `UNWIND $rows AS row MERGE (n {id: row.id}) SET n:Fact, n.text = row.text, …` | ~1 900 rows/s |
+| `UNWIND $rows AS row MATCH (s:Fact {id: row.s}), (d:Turn {id: row.d}) MERGE (s)-[r:DERIVED_FROM {id: row.rid}]->(d)` | ~1 700 edges/s |
+
+Concurrency does not help — writes serialise server-side, and 32 parallel
+single-statement writers measured the same ~17/s as one. So the ingest pipeline
+stages an entire corpus in memory and flushes it as a fixed sequence of batches:
+vertices by label, then edges by type. `custodia.hydra.client` is built around
+that and nothing else.
+
+Two constraints come with the batch forms. The server admits **1024 rows per
+batch** (`client_query_batch_items rejected by admission control`), so batches
+are chunked and a transient rejection halves the chunk and retries. And every row
+in a batch must carry the same fields, because the statement is compiled once
+from the field names — so rows are grouped by their key set before a statement is
+built.
+
+### 2. Vertex ids are the identity, and they are integers
+
+There is no separate primary key to `MERGE` against: the `id` in the pattern *is*
+the vertex. That is a constraint with a large payoff once you lean into it.
+Custodia derives every id by hashing a namespaced key (`custodia.ids`), which
+means:
+
+* the id of a fact can be computed before the graph is touched, which is what
+  lets a whole session be staged offline and flushed in two round trips;
+* re-ingesting the same content rewrites the same vertices instead of duplicating
+  them, so an interrupted ingest is fixed by running it again;
+* crash recovery needed no extra machinery. Kill the container mid-ingest, bring
+  it back, re-run: the committed prefix is already there and the rest lands on
+  top.
+
+`MERGE` also has no `ON CREATE` / `ON MATCH`, and a `MERGE` pattern may not carry
+payload properties — the pattern is the identity being matched, so writing extra
+properties into it would rewrite what it matched. The upsert form is therefore
+always `MERGE` by id followed by `SET`, which is exactly what the batch writer
+emits.
+
+### 3. `algo.MSpaths` returns evidence chains, not endpoints
+
+This is why the product is on a graph database at all.
+
+Plain `MATCH` projects endpoint properties. Retrieval needs the *path*: the fact,
+the turn it was derived from, the session that turn sat in, and any supersession
+that displaced it. HydraDB's native path procedures return the whole path,
+bounded, from many sources at once:
+
+```cypher
+CALL algo.MSpaths({
+  sourceLabel: 'Entity', sourceProperty: 'norm',
+  sourceValues: ['shellfish', 'sesame', 'nora'],
+  relTypes: ['MENTIONS', 'DERIVED_FROM', 'SUPERSEDES', 'CORROBORATES'],
+  maxLen: 3, relDirection: 'both', pathCount: 400
+}) YIELD path, pathCost RETURN path, pathCost
+```
+
+One statement takes every entity the question resolved to and comes back with
+the chains that reach them. Custodia parses each path into an `Evidence` record
+whose `path` field is the literal hop sequence the engine walked — which is what
+the client renders when you click "chain of custody" on a citation, and what
+makes a citation checkable rather than decorative.
+
+The equivalent on a vector store is a similarity list with no structure to
+inspect. The equivalent with plain `MATCH` is one round trip per shape of chain.
+
+`SSpaths` (one source) and `SPpaths` (source to target) are used for the
+supersession lineage and for "how is this fact connected to that one".
+
+## Working inside the Cypher subset
+
+HydraDB implements a deliberate subset and rejects the rest at parse time with a
+reason. Rather than route around it, each gap pushed the model somewhere better:
+
+| not available | what we do instead |
+|---|---|
+| `IN` in `WHERE` | set membership is a hop through `MENTIONS` — the graph-native form anyway. Multi-value lookups go through `algo.MSpaths` `sourceValues`, or `UNION` arms. |
+| `IS NULL` | absence is a sentinel: `valid_to = 0` means "still open". Explicit, indexable, and it survives a scalar-only property model. |
+| variable-length `MATCH` without a fixed source id | multi-seed traversal is what the path procedures are for. |
+| `min` / `max` aggregates | ordering plus `LIMIT 1`. |
+| `CONTAINS` | `STARTS WITH` for prefix work; everything else is BM25's job. |
+| explicit transactions | deterministic ids make every write idempotent, so a retry is safe without one. |
+| node-only `MATCH` with no predicate | every read is label-scoped, which is good hygiene regardless. |
+
+The one place the subset genuinely costs something: property values are scalars,
+so the BM25 posting lists live in a JSON file beside the graph, keyed by vertex
+id. It is honest to say that part is not in HydraDB.
+
+## Durability, demonstrated rather than asserted
+
+Writes commit to object storage per statement, so "did it survive" is testable
+in ten seconds rather than argued about:
+
+```bash
+custodia seed
+docker kill custodia-hydradb          # not a graceful shutdown
+docker compose up -d hydradb
+custodia ask "Is Nora allergic to anything?"
+```
+
+The memory is intact, and the answer still cites the January session it came
+from. `custodia audit` re-checks the provenance invariant against the recovered
+graph.
