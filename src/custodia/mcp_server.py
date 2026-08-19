@@ -54,11 +54,13 @@ def _gate(corpus: str) -> Any:
         from custodia.audit import Auditor
         from custodia.gate import Gate
         from custodia.lexical import LexicalIndex
+        from custodia.llm import LLM
         from custodia.retrieve import Retriever
 
         client = _graph()
-        retriever = Retriever(client, corpus, index=LexicalIndex.build(client, corpus))
-        _gates[corpus] = Gate(retriever, auditor=Auditor(client, corpus))
+        llm = LLM()
+        retriever = Retriever(client, corpus, index=LexicalIndex.build(client, corpus), llm=llm)
+        _gates[corpus] = Gate(retriever, llm=llm, auditor=Auditor(client, corpus))
     return _gates[corpus]
 
 
@@ -143,8 +145,14 @@ def recall(question: str, corpus: str | None = None, as_of: str = "") -> dict[st
     moment = _parse_time(as_of)
     verdict = _gate(name).ask(question, as_of=moment)
     payload = verdict.as_dict()
-    payload.pop("warrant", None)
-    payload["citations"] = [c for c in payload.get("cited_facts", [])] or payload.get("citations", [])
+    # the full warrant is what `evidence` is for; a recall carries only the
+    # facts the answer actually rests on, so the caller can check them
+    warrant = payload.pop("warrant", {}) or {}
+    cited = set(verdict.citations)
+    payload["cited_facts"] = [
+        item for item in warrant.get("evidence", []) if item.get("fact_id") in cited
+    ]
+    payload["quarantined_seen"] = warrant.get("quarantined_seen", 0)
     return payload
 
 
@@ -160,7 +168,9 @@ def evidence(question: str, corpus: str | None = None, as_of: str = "", limit: i
 
     name = _corpus(corpus)
     client = _graph()
-    retriever = Retriever(client, name, index=LexicalIndex.build(client, name))
+    from custodia.llm import LLM
+
+    retriever = Retriever(client, name, index=LexicalIndex.build(client, name), llm=LLM())
     warrant = retriever.warrant(question, as_of=_parse_time(as_of), k=limit)
     return warrant.as_dict()
 

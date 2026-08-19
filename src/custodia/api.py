@@ -57,15 +57,17 @@ def graph() -> HydraClient:
 def gate_for(corpus: str) -> Any:
     """One Gate per corpus, kept warm so the lexical index is not rebuilt per call."""
     if corpus not in _gates:
+        from custodia.audit import Auditor
         from custodia.gate import Gate
         from custodia.lexical import LexicalIndex
+        from custodia.llm import LLM
         from custodia.retrieve import Retriever
-        from custodia.audit import Auditor
 
         client = graph()
+        llm = LLM()
         index = LexicalIndex.build(client, corpus)
-        retriever = Retriever(client, corpus, index=index)
-        _gates[corpus] = Gate(retriever, auditor=Auditor(client, corpus))
+        retriever = Retriever(client, corpus, index=index, llm=llm)
+        _gates[corpus] = Gate(retriever, llm=llm, auditor=Auditor(client, corpus))
     return _gates[corpus]
 
 

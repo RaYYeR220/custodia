@@ -57,10 +57,12 @@ def _gate(client: HydraClient, corpus: str) -> Any:
     from custodia.audit import Auditor
     from custodia.gate import Gate
     from custodia.lexical import LexicalIndex
+    from custodia.llm import LLM
     from custodia.retrieve import Retriever
 
-    retriever = Retriever(client, corpus, index=LexicalIndex.build(client, corpus))
-    return Gate(retriever, auditor=Auditor(client, corpus))
+    llm = LLM()
+    retriever = Retriever(client, corpus, index=LexicalIndex.build(client, corpus), llm=llm)
+    return Gate(retriever, llm=llm, auditor=Auditor(client, corpus))
 
 
 def _corpus(value: str | None) -> str:
