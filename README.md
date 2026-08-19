@@ -49,6 +49,11 @@ Custodia is a memory layer where all three are structural rather than aspiration
   warrant it was handed. An invented citation, an empty warrant, a timeout, a
   malformed response, a provider outage — all take the same exit, and that exit
   is abstention.
+- **Advice is allowed, and labelled.** Not every question asks memory to recall
+  something. "What should I bake for colleagues" has no stored answer, but a fact
+  about a cake that went down well last time belongs in it. Custodia answers those
+  too — cited, checked for relevance rather than entailment, and marked as advice
+  rather than recall, so the two are never confused.
 
 ## Try it
 
