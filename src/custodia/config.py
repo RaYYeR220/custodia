@@ -58,27 +58,32 @@ class Settings:
     corpus: str = field(default_factory=lambda: _env("CUSTODIA_CORPUS", "default"))
 
     # --- language model ----------------------------------------------------
-    #: any OpenAI-compatible endpoint: OpenRouter, Venice, a local server
+    #: Any OpenAI-compatible endpoint: Venice, OpenRouter, a local server.
+    #:
+    #: The defaults below are not a recommendation, they are a fact about the
+    #: shipped cache: a cache key covers the model name, so the walkthrough can
+    #: only replay without credentials if the configured model matches the one
+    #: that produced the entries. Point these at your own provider and the cache
+    #: simply stops matching, which is the honest behaviour - you get live calls
+    #: from the model you asked for, not somebody else's recorded answers.
     llm_base_url: str = field(
-        default_factory=lambda: _env("CUSTODIA_LLM_BASE_URL", "https://openrouter.ai/api/v1")
+        default_factory=lambda: _env("CUSTODIA_LLM_BASE_URL", "https://api.venice.ai/api/v1")
     )
     llm_api_key: str = field(default_factory=lambda: _env("CUSTODIA_LLM_API_KEY"))
     #: cheap, high-throughput model for turning turns into facts
     extract_model: str = field(
-        default_factory=lambda: _env("CUSTODIA_EXTRACT_MODEL", "qwen/qwen3.7-flash")
+        default_factory=lambda: _env("CUSTODIA_EXTRACT_MODEL", "gemini-3-5-flash-lite")
     )
     #: the model that reads a warrant and writes the answer
     answer_model: str = field(
-        default_factory=lambda: _env("CUSTODIA_ANSWER_MODEL", "google/gemini-3-flash-preview")
+        default_factory=lambda: _env("CUSTODIA_ANSWER_MODEL", "gemini-3-7-flash")
     )
     #: the grader used by the evaluation harness, kept separate from the
-    #: answering model so a run can be judged by something it did not write
-    judge_model: str = field(
-        default_factory=lambda: _env("CUSTODIA_JUDGE_MODEL", "google/gemini-3-flash-preview")
-    )
-    #: long-context model for the full-context baseline (needs the whole haystack)
+    #: answering model so a run is judged by something that did not write it
+    judge_model: str = field(default_factory=lambda: _env("CUSTODIA_JUDGE_MODEL", "grok-4-5"))
+    #: long-context model for the full-context baseline (it takes the whole haystack)
     baseline_model: str = field(
-        default_factory=lambda: _env("CUSTODIA_BASELINE_MODEL", "qwen/qwen3.7-flash")
+        default_factory=lambda: _env("CUSTODIA_BASELINE_MODEL", "gemini-3-5-flash-lite")
     )
     llm_timeout: float = field(default_factory=lambda: _num("CUSTODIA_LLM_TIMEOUT", 90.0))
     llm_retries: int = field(default_factory=lambda: int(_num("CUSTODIA_LLM_RETRIES", 3)))

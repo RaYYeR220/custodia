@@ -133,10 +133,10 @@ warrant is the only thing the answering model ever sees.
 | `HYDRA_URI` | `bolt://127.0.0.1:7687` | HydraDB Bolt endpoint |
 | `HYDRA_TOKEN` | `local-development-token-32-bytes` | HydraDB auth token |
 | `CUSTODIA_CORPUS` | `default` | which memory to read and write |
-| `CUSTODIA_LLM_BASE_URL` | OpenRouter | any OpenAI-compatible endpoint |
-| `CUSTODIA_LLM_API_KEY` | *(unset)* | unset means cache-only, which is enough for the demo |
-| `CUSTODIA_EXTRACT_MODEL` | `qwen/qwen3.7-flash` | turns to facts |
-| `CUSTODIA_ANSWER_MODEL` | `google/gemini-3-flash-preview` | warrant to answer |
+| `CUSTODIA_LLM_BASE_URL` | Venice | any OpenAI-compatible endpoint |
+| `CUSTODIA_LLM_API_KEY` | *(unset)* | unset replays the shipped cache, which covers the demo |
+| `CUSTODIA_EXTRACT_MODEL` | `gemini-3-5-flash-lite` | turns to facts |
+| `CUSTODIA_ANSWER_MODEL` | `gemini-3-7-flash` | warrant to answer |
 | `CUSTODIA_CACHE_ONLY` | `false` | serve only from the on-disk response cache |
 | `CUSTODIA_WARRANT_SIZE` | `20` | maximum facts in a warrant |
 | `CUSTODIA_VERIFY_CITATIONS` | `true` | run the second-pass citation check |
