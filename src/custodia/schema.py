@@ -83,6 +83,19 @@ ASSISTANT_ROLES = {"assistant", "ai", "agent", "bot"}
 TOOL_ROLES = {"tool", "function", "observation"}
 
 
+#: separator for the corpus-scoped entity key. `algo.MSpaths` seeds from a
+#: property value across the whole graph, with no way to restrict it to one
+#: corpus, so the corpus has to be *inside* the value being matched. Without
+#: this, a second tenant's entities seed the walk and the bounded path budget is
+#: spent on somebody else's data.
+CKEY_SEP = "::"
+
+
+def corpus_key(corpus: str, norm: str) -> str:
+    """The value `Entity.ckey` carries, and the value retrieval seeds on."""
+    return f"{corpus}{CKEY_SEP}{norm}"
+
+
 def tier_for_role(role: str, *, external: bool = False) -> Tier:
     r = (role or "").strip().lower()
     if external:

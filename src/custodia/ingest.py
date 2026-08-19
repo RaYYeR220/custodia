@@ -636,6 +636,9 @@ class Ingestor:
                 "id": ids.entity_id(self.corpus, norm),
                 "corpus": self.corpus,
                 "norm": norm,
+                # corpus-scoped duplicate of `norm`, because the path procedures
+                # seed on a property value across the whole graph
+                "ckey": schema.corpus_key(self.corpus, norm),
                 "name": self._entities[norm],
             }
             for norm in sorted(self._entities)

@@ -493,8 +493,11 @@ class Retriever:
             rows = self.client.paths(
                 rel_types=schema.RETRIEVAL_RELS,
                 source_label=schema.ENTITY,
-                source_property="norm",
-                source_values=list(entities),
+                # seeding on the corpus-scoped key keeps another tenant's
+                # entities out of the walk, so the bounded path budget is spent
+                # here and a warrant does not change when a neighbour ingests
+                source_property="ckey",
+                source_values=[schema.corpus_key(self.corpus, e) for e in entities],
                 max_len=self.settings.path_max_len,
                 direction="both",
                 count=self.settings.path_count,

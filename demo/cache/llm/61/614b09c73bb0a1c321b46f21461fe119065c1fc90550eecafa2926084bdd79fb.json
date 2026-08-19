@@ -1,1 +1,1 @@
-{"text": "```json\n{\"entities\": [\"nora\", \"sesame allergy\"], \"predicates\": [\"started\", \"began\"]}\n```", "model": "gemini-3-5-flash-lite", "prompt_tokens": 137, "completion_tokens": 28, "written_at": 1787169141}
+{"text": "```json\n{\"entities\": [\"nora\", \"sesame allergy\"], \"predicates\": [\"started\", \"when\"]}\n```", "model": "gemini-3-5-flash-lite", "prompt_tokens": 137, "completion_tokens": 27, "written_at": 1787169583}
