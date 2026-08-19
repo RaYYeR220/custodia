@@ -147,7 +147,9 @@ class PoisonedCustodia(CustodiaSystem):
                 turn["origin"] = origin
 
         started = time.perf_counter()
-        report = ingest_sessions(client, corpus, payload)
+        from eval.run_longmemeval import _custodia_extractor
+
+        report = ingest_sessions(client, corpus, payload, extract=_custodia_extractor())
         return {
             "corpus": corpus,
             "ingest_ms": round((time.perf_counter() - started) * 1000, 1),

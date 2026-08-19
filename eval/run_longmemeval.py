@@ -52,6 +52,24 @@ app = typer.Typer(add_completion=False, help=__doc__)
 DEFAULT_SYSTEMS = "custodia,fullcontext,rag"
 
 
+
+def _custodia_extractor() -> Any:
+    """Extraction bound to a live model, with an eval-sized window.
+
+    The default six-turn window is right for a chat session being ingested as it
+    happens; over a fifty-session benchmark haystack it costs three times the
+    calls for no extra recall, and the provider's request ceiling is the binding
+    constraint on a full run. LongMemEval is written in the first person, so the
+    principal is simply "user".
+    """
+    from custodia.extract import extract_session
+    from custodia.llm import LLM
+
+    llm = LLM()
+    return lambda turns: extract_session(
+        turns, llm=llm, principal="user", window=16, overlap=3
+    )
+
 class MissingIntegration(RuntimeError):
     """A Custodia module or entry point the runner needs is not present yet."""
 
@@ -166,7 +184,12 @@ class CustodiaSystem:
                 "custodia.ingest exposes neither ingest_sessions nor ingest_instance"
             )
         started = time.perf_counter()
-        report = fn(client, corpus, self.as_payload(instance.sessions))
+        report = fn(
+            client,
+            corpus,
+            self.as_payload(instance.sessions),
+            extract=_custodia_extractor(),
+        )
         elapsed = (time.perf_counter() - started) * 1000
         return {
             "corpus": corpus,
@@ -194,9 +217,12 @@ class CustodiaSystem:
         except ImportError as exc:
             raise MissingIntegration(f"custodia.gate/retrieve is not importable: {exc}") from exc
 
+        from custodia.llm import LLM
+
+        llm = LLM()
         index = self.build_index(corpus)
-        retriever = Retriever(client, corpus, index=index)
-        gate = Gate(retriever)
+        retriever = Retriever(client, corpus, index=index, llm=llm)
+        gate = Gate(retriever, llm=llm)
         started = time.perf_counter()
         verdict = gate.ask(instance.question, as_of=None)
         elapsed = (time.perf_counter() - started) * 1000

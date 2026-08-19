@@ -40,6 +40,13 @@ stages an entire corpus in memory and flushes it as a fixed sequence of batches:
 vertices by label, then edges by type. `custodia.hydra.client` is built around
 that and nothing else.
 
+**Property values have a length ceiling.** A string over roughly 32 KB fails the
+statement with `internal query execution error` -- and because a batch is one
+statement, one oversized value takes the whole batch with it. Measured: 32 000
+characters stored, 40 000 refused. The client clips at 32 000 with a visible
+marker and a warning, rather than dropping the row: a turn we cannot store in
+full is still a turn a fact has to point at.
+
 A third property is worth designing around: an edge batch whose endpoint does
 not exist fails the whole statement (`MATCH endpoint vertex … does not exist`)
 rather than skipping the row. That is the right behaviour — a silently dropped

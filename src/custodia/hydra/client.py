@@ -32,6 +32,14 @@ log = logging.getLogger("custodia.hydra")
 #: server-side admission limit is 1024 rows; stay under it with room for retries
 MAX_BATCH = 500
 
+#: Longest string HydraDB will store in a property. Measured: 32 000 characters
+#: is accepted, 40 000 fails the whole statement with `internal query execution
+#: error` - and it takes the rest of the batch down with it. Values are clipped
+#: rather than dropped, because a turn we cannot store in full is still a turn a
+#: fact needs to point at, and a loud marker in the text beats a lost vertex.
+MAX_STRING = 32_000
+CLIP_MARKER = " […clipped]"
+
 
 class HydraError(RuntimeError):
     """A query HydraDB refused, with the statement that caused it."""
@@ -52,7 +60,21 @@ def _clean(value: Any) -> Any:
 
 
 def _row(props: dict[str, Any]) -> dict[str, Any]:
-    return {k: _clean(v) for k, v in props.items() if _clean(v) is not None}
+    row: dict[str, Any] = {}
+    for key, value in props.items():
+        cleaned = _clean(value)
+        if cleaned is None:
+            continue
+        if isinstance(cleaned, str) and len(cleaned) > MAX_STRING:
+            log.warning(
+                "clipping %s from %d to %d characters: HydraDB rejects longer properties",
+                key,
+                len(cleaned),
+                MAX_STRING,
+            )
+            cleaned = cleaned[: MAX_STRING - len(CLIP_MARKER)] + CLIP_MARKER
+        row[key] = cleaned
+    return row
 
 
 def _chunks(rows: Sequence[dict[str, Any]], size: int) -> Iterator[Sequence[dict[str, Any]]]:
