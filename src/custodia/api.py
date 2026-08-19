@@ -407,6 +407,14 @@ def attack(req: AttackRequest) -> dict[str, Any]:
     invalidate(name)
 
     after = gate_for(name).ask(req.question, record=False)
+
+    # The citation set, not the wording, is what says whether the write reached
+    # the answer. A model that rewrites "Yes, X" as "X" has changed the string
+    # and nothing else; a model that has started citing the injected fact has
+    # changed the answer no matter how similar it reads. Both are reported, and
+    # the verdict is taken from the citations, because those are the part the
+    # product can actually prove.
+    cited_before, cited_after = set(before.citations), set(after.citations)
     return {
         "corpus": name,
         "injected": {"text": req.text, "tier": tier.label, "origin": req.origin, "session": sid},
@@ -414,6 +422,8 @@ def attack(req: AttackRequest) -> dict[str, Any]:
         "before": before.as_dict(),
         "after": after.as_dict(),
         "answer_changed": before.answer.strip() != after.answer.strip(),
+        "citations_changed": cited_before != cited_after,
+        "citations_added": sorted(cited_after - cited_before),
         "quarantined": report.quarantined,
         "rejections": report.rejections,
     }

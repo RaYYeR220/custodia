@@ -118,6 +118,8 @@ export interface AttackResult {
   before: Verdict;
   after: Verdict;
   answer_changed: boolean;
+  citations_changed: boolean;
+  citations_added: number[];
   quarantined: number;
   rejections: number;
 }
