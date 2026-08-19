@@ -80,12 +80,18 @@ PHRASE_MAX = 3
 # the same on that term, and the ordering collapses onto recency and tier. The
 # lexical term is what makes "what does the user drink" rank the drink fact
 # above the gym fact, so it carries the larger weight of the two.
-W_LEXICAL = 0.30
-W_ANCHOR = 0.15
-W_PROXIMITY = 0.15
-W_TIER = 0.15
-W_CORROBORATION = 0.10
-W_RECENCY = 0.15
+#
+# Tier carries more weight than any other structural term because memory now
+# records what the assistant said as well as what the principal said. Those two
+# voices restate each other constantly, and when they disagree the principal is
+# right by definition. A tier term that only nudges the ordering lets a stale
+# assistant restatement sit above the fact that replaced it.
+W_LEXICAL = 0.28
+W_ANCHOR = 0.12
+W_PROXIMITY = 0.12
+W_TIER = 0.28
+W_CORROBORATION = 0.08
+W_RECENCY = 0.12
 
 #: corroboration saturates: the fourth independent witness adds nothing
 CORROBORATION_CAP = 3
