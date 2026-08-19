@@ -1,1 +1,0 @@
-{"text": "```json\n{\n  \"answer\": \"Nora is a design lead (starting April 1, 2026) and works at Marloe.\",\n  \"citations\": [\n    4578556435106773044,\n    2836006123838619767\n  ],\n  \"sufficient\": true\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 2936, "completion_tokens": 518, "written_at": 1787163693}

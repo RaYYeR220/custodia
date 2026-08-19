@@ -1,1 +1,1 @@
-{"text": "```json\n{\n  \"entities\": [\"nora\", \"berlin\", \"airline\"],\n  \"predicates\": [\"flew to\"]\n}\n```", "model": "gemini-3-5-flash-lite", "prompt_tokens": 137, "completion_tokens": 35, "written_at": 1787163736}
+{"text": "{\"entities\": [\"nora\", \"berlin\", \"airline\"], \"predicates\": [\"flew to\", \"travelled with\"]}", "model": "gemini-3-5-flash-lite", "prompt_tokens": 137, "completion_tokens": 28, "written_at": 1787169122}

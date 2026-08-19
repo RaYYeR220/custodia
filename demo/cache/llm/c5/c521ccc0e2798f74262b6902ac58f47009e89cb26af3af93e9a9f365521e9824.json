@@ -1,1 +1,0 @@
-{"text": "```json\n{\n  \"answer\": \"Nora is allergic to shellfish and sesame.\",\n  \"citations\": [\n    1036381142946795615,\n    432720033355667563\n  ],\n  \"sufficient\": true\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 2932, "completion_tokens": 442, "written_at": 1787163749}
