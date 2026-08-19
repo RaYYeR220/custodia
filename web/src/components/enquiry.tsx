@@ -154,7 +154,7 @@ export function Enquiry({ corpus }: { corpus?: string }) {
                 >
                   <span className="text-bone-dim group-hover:text-bone">{s.question}</span>
                   {s.as_of && <span className="label ml-2 text-brass">as of {s.as_of.slice(0, 10)}</span>}
-                  <span className="block label mt-1 normal-case tracking-normal text-[11px]">{s.why}</span>
+                  <span className="block note mt-1.5">{s.why}</span>
                 </button>
               ))}
             </div>

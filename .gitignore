@@ -33,6 +33,9 @@ eval/data/*.json
 eval/results/
 tests/_cache/
 
+# notes the dev server regenerates on every start
+web/*.md
+
 # editor and scratch
 .idea/
 .vscode/

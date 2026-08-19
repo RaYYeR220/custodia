@@ -100,9 +100,7 @@ export function AttackConsole({ corpus }: { corpus?: string }) {
                 </span>
                 <span className="label">{p.tier}</span>
               </div>
-              <span className="block label mt-1 normal-case tracking-normal text-[11px] leading-snug">
-                {p.note}
-              </span>
+              <span className="block note mt-1.5">{p.note}</span>
             </button>
           ))}
         </div>

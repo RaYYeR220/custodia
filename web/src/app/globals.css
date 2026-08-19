@@ -122,6 +122,17 @@ body::before {
   color: var(--color-bone-faint);
 }
 
+/* Explanatory copy. Distinct from .label on purpose: a caption set in tracked
+   uppercase stops being readable somewhere around the fourth word. */
+.note {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--color-bone-faint);
+}
+
 /* --------------------------------------------------------------- fixtures */
 .card {
   background: var(--color-ground-2);
