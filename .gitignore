@@ -21,29 +21,17 @@ dist/
 .hydradb/
 data/
 *.log
-.cache/
 
-# datasets (downloaded, not vendored)
+# datasets and results are downloaded or produced, not vendored
 eval/data/raw/
-eval/data/*.json
-!eval/data/manifest.json
+eval/results/
+tests/_cache/
 
-# working notes / scratch
-_internal/
-*-internal/
+# editor and scratch
+.idea/
+.vscode/
+.DS_Store
 scratch/
 notes/
-plans/
-specs/
-mockups/
-ui-prototypes/
-design-ref/
-variants/
-.remember/
-MEMORY.md
-.claude/
-.agents/
-superpowers/
-docs/superpowers/
-*.bundle
 *-backup*
+*.bundle
