@@ -383,6 +383,11 @@ def attack(req: AttackRequest) -> dict[str, Any]:
     tier = Tier.parse(req.tier)
     now = int(time.time())
     sid = f"attack-{now}"
+    # `origin` means "this content came from outside the conversation", and
+    # `stage_session` clamps a turn carrying one down to the external tier. An
+    # owner or assistant message typed here is the principal or the agent
+    # speaking, so it must not carry one - otherwise the console silently
+    # demotes the very write it is trying to test.
     turn = Turn(
         corpus=name,
         sid=sid,
@@ -392,7 +397,7 @@ def attack(req: AttackRequest) -> dict[str, Any]:
         text=req.text,
         ts=now,
         tier=tier,
-        origin=req.origin,
+        origin=req.origin if tier <= Tier.TOOL else "",
     )
     from custodia.demo import extractor
 

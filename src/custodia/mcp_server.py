@@ -122,7 +122,10 @@ def remember(
         text=text,
         ts=now,
         tier=parsed,
-        origin=origin,
+        # an origin marks content as coming from outside the conversation, which
+        # clamps the turn to the external tier - correct for a document or a tool
+        # result, wrong for something the principal or the agent said
+        origin=origin if parsed <= Tier.TOOL else "",
     )
     from custodia.demo import extractor
 
