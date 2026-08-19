@@ -271,6 +271,7 @@ class LLM:
         }
         if stop:
             payload["stop"] = list(stop)
+        payload.update(_provider_extras(self.settings.llm_base_url))
 
         completion = _completion(self._post(payload), model)
         self._write_cache(key, completion)
@@ -432,6 +433,29 @@ class LLM:
             else:
                 self._usage["prompt_tokens"] += completion.prompt_tokens
                 self._usage["completion_tokens"] += completion.completion_tokens
+
+
+def _provider_extras(base_url: str) -> dict[str, Any]:
+    """Provider-specific body fields needed to keep a prompt actually clean.
+
+    Venice prepends its own system prompt to every request unless asked not to.
+    Custodia's whole claim is that the answering model sees the warrant and
+    nothing else, so an injected preamble is not a cosmetic difference - it is a
+    confound in the one measurement that matters. Turn it off.
+
+    Thinking is disabled for the same reason plus a practical one: a reasoning
+    model can spend the whole token budget on a monologue and return an empty
+    message, which is indistinguishable from a provider failure downstream.
+    """
+    if "venice.ai" in base_url:
+        return {
+            "venice_parameters": {
+                "include_venice_system_prompt": False,
+                "disable_thinking": True,
+                "strip_thinking_response": True,
+            }
+        }
+    return {}
 
 
 def _completion(body: dict[str, Any], model: str) -> Completion:
