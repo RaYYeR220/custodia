@@ -385,14 +385,32 @@ class LLM:
 
     # ------------------------------------------------------------------ cache
 
-    def _cache_file(self, key: str) -> Path:
-        return Path(self.settings.cache_dir) / "llm" / key[:2] / f"{key}.json"
+    def _cache_file(self, key: str, root: Path | None = None) -> Path:
+        return Path(root or self.settings.cache_dir) / "llm" / key[:2] / f"{key}.json"
+
+    def _cache_roots(self) -> list[Path]:
+        """Writable cache first, then any read-only roots shipped with the repo.
+
+        The shipped root is what lets someone clone this and run the whole
+        walkthrough without credentials: the exact completions the demo needs
+        are committed, content-addressed by the call that produced them.
+        """
+        roots = [Path(self.settings.cache_dir)]
+        for extra in self.settings.cache_seed_dirs:
+            path = Path(extra)
+            if path not in roots:
+                roots.append(path)
+        return roots
 
     def _read_cache(self, key: str) -> Completion | None:
-        path = self._cache_file(key)
-        try:
-            record = json.loads(path.read_text("utf-8"))
-        except (OSError, ValueError):
+        record = None
+        for root in self._cache_roots():
+            try:
+                record = json.loads(self._cache_file(key, root).read_text("utf-8"))
+                break
+            except (OSError, ValueError):
+                continue
+        if record is None:
             return None
         text = record.get("text")
         if not isinstance(text, str):

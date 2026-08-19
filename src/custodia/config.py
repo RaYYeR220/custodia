@@ -80,6 +80,13 @@ class Settings:
         default_factory=lambda: Path(_env("CUSTODIA_CACHE_DIR", str(REPO_ROOT / "data" / "cache")))
     )
     cache_only: bool = field(default_factory=lambda: _flag("CUSTODIA_CACHE_ONLY", False))
+    #: read-only cache roots searched after the writable one. The demo cache is
+    #: committed to the repository so the walkthrough runs with no credentials.
+    cache_seed_dirs: tuple[Path, ...] = field(
+        default_factory=lambda: tuple(
+            Path(p) for p in (_env("CUSTODIA_CACHE_SEED_DIRS") or str(REPO_ROOT / "demo" / "cache")).split(os.pathsep) if p
+        )
+    )
 
     # --- retrieval ---------------------------------------------------------
     seed_entities: int = field(default_factory=lambda: int(_num("CUSTODIA_SEED_ENTITIES", 12)))
