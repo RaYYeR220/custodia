@@ -197,7 +197,10 @@ PREDICATES: dict[str, str] = {
     "email": "single",
     "phone": "single",
     "handle": "multi",
-    # what an untrusted source asserts, kept distinct from what is true
+    # what a voice other than the principal stated - a quoted document, or the
+    # assistant explaining something - kept distinct from what is true. The tier
+    # separates those two: externally sourced claims never reach a warrant at
+    # all, while the assistant's own words do, ranked below the principal's.
     "asserts": "multi",
 }
 
