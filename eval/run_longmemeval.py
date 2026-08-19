@@ -420,7 +420,17 @@ def run(
     if judge_mode == "llm" and llm is None:
         typer.secho("--judge llm requested but no provider is configured", fg=typer.colors.RED)
         raise typer.Exit(code=2)
-    judge_llm = llm if use_llm_judge else None
+    # The grader must not be the model whose answers it is grading. Binding it
+    # separately costs one more client and removes the most obvious objection to
+    # any number in this file.
+    judge_llm = None
+    if use_llm_judge:
+        from custodia.config import settings as _custodia_settings
+
+        try:
+            judge_llm = resolve_llm(role="judge", model=_custodia_settings().judge_model)
+        except NoProviderConfigured:
+            judge_llm = llm
     if judge_llm is None:
         skipped["judge"] = (
             "graded by the non-LLM lexical fallback, which is materially weaker than "

@@ -704,8 +704,9 @@ def test_verdict_as_dict_is_serialisable(settings):
 
     assert set(payload) == {
         "answered", "answer", "citations", "abstained_because",
-        "latency_ms", "model", "verified", "checks", "warrant",
+        "latency_ms", "model", "verified", "kind", "checks", "warrant",
     }
+    assert payload["kind"] == "recall"
     assert payload["citations"] == [GYM]
     assert payload["warrant"]["evidence"][0]["fact_id"] == GYM
     assert set(payload["warrant"]["evidence"][0]) == {
@@ -713,3 +714,57 @@ def test_verdict_as_dict_is_serialisable(settings):
         "session_index", "turn_index", "turn_text", "turn_ts", "score", "hops",
         "path", "superseded_by",
     }
+
+
+# --------------------------------------------------------------------------- #
+# advisory answers: shaped by memory, never a substitute for it
+# --------------------------------------------------------------------------- #
+
+
+def grounded_reply(*ids: int) -> dict:
+    return {
+        "answer": "Something along the lines of the lemon poppyseed cake that went down well.",
+        "citations": list(ids),
+        "sufficient": False,
+        "kind": "grounded",
+    }
+
+
+def test_an_advisory_answer_is_allowed_and_labelled(settings):
+    """A question with no stored answer may still be shaped by stored facts."""
+    settings.verify_citations = True
+    llm = StubLLM(grounded_reply(GYM), {"relevant": True, "reason": "same baker"})
+    verdict = build(decisive(), llm, settings).ask("What should I bake?", record=False)
+
+    assert verdict.answered is True
+    assert verdict.kind == "grounded"
+    assert verdict.citations == [GYM]
+    assert gate.CHECK_GROUNDED in verdict.checks
+
+
+def test_an_advisory_answer_still_needs_a_citation_that_earned_its_place(settings):
+    settings.verify_citations = True
+    llm = StubLLM(grounded_reply(GYM), {"relevant": False, "reason": "unrelated"})
+    verdict = build(decisive(), llm, settings).ask("What should I bake?", record=False)
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.UNVERIFIED_CITATION
+
+
+def test_grounded_mode_can_be_turned_off_for_a_strict_reading(settings):
+    llm = StubLLM(grounded_reply(GYM), {"relevant": True, "reason": "same baker"})
+    verdict = build(decisive(), llm, settings, grounded=False).ask(
+        "What should I bake?", record=False
+    )
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.INSUFFICIENT
+
+
+def test_an_advisory_answer_may_not_invent_a_citation(settings):
+    settings.verify_citations = True
+    llm = StubLLM(grounded_reply(999_999), {"relevant": True, "reason": "n/a"})
+    verdict = build(decisive(), llm, settings).ask("What should I bake?", record=False)
+
+    assert verdict.answered is False
+    assert verdict.abstained_because == gate.INVENTED_CITATION

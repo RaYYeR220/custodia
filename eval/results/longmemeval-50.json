@@ -1,0 +1,258 @@
+{
+  "provenance": {
+    "kind": "longmemeval",
+    "run": "longmemeval-50",
+    "started_at": "2026-08-19T18:24:29Z",
+    "finished_at": "2026-08-19T20:17:56Z",
+    "dataset": "s",
+    "dataset_variant": "s",
+    "dataset_sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
+    "dataset_source_url": "https://huggingface.co/datasets/xiaowu0162/longmemeval/resolve/main/longmemeval_s",
+    "dataset_items_available": 500,
+    "sample_size": 50,
+    "seed": 0,
+    "stratified": true,
+    "types": "all",
+    "systems": [
+      "custodia",
+      "fullcontext",
+      "rag"
+    ],
+    "answer_model": "gemini-3-7-flash",
+    "judge_model": "gemini-3-7-flash",
+    "llm_binding": "custodia.llm",
+    "judge_mode": "llm-judge",
+    "system_settings": {
+      "custodia": {
+        "system": "custodia",
+        "corpus_prefix": "eval-"
+      },
+      "fullcontext": {
+        "system": "fullcontext",
+        "context_tokens": 128000,
+        "reserve_tokens": 2000,
+        "truncation": "drop oldest sessions first",
+        "token_estimator": "chars/4 heuristic (no tokenizer dependency; comparable across systems, not exact)"
+      },
+      "rag": {
+        "system": "rag",
+        "top_k": 12,
+        "turns_per_chunk": 4,
+        "chunk_overlap": 1,
+        "index": "eval-local-bm25",
+        "token_estimator": "chars/4 heuristic (no tokenizer dependency; comparable across systems, not exact)"
+      }
+    }
+  },
+  "dataset_stats": {
+    "datasets": [
+      "longmemeval-s"
+    ],
+    "instances": 50,
+    "by_type": {
+      "knowledge-update": 9,
+      "multi-session": 13,
+      "single-session-assistant": 5,
+      "single-session-preference": 3,
+      "single-session-user": 7,
+      "temporal-reasoning": 13
+    },
+    "abstention": {
+      "items": 8,
+      "share": 0.16,
+      "by_type": {
+        "knowledge-update": 3,
+        "multi-session": 2,
+        "single-session-user": 1,
+        "temporal-reasoning": 2
+      },
+      "note": "in a sampled run this share may exceed the source dataset's share: sampling enforces a floor of 8 abstention questions so the abstention rates have a usable denominator, itself capped at 25% of the sample so a small run is not dominated by them"
+    },
+    "sessions": {
+      "total": 2480,
+      "min": 43,
+      "max": 60,
+      "mean": 49.6
+    },
+    "turns": {
+      "total": 24749,
+      "min": 419,
+      "max": 608,
+      "mean": 494.98
+    },
+    "tokens_estimated": {
+      "estimator": "chars/4 heuristic (no tokenizer dependency; comparable across systems, not exact)",
+      "per_instance_min": 116930,
+      "per_instance_max": 126328,
+      "per_instance_mean": 121953.2,
+      "total": 6097658
+    },
+    "evidence_turns_labelled": 75
+  },
+  "scorecards": {
+    "custodia": {
+      "system": "custodia",
+      "n": 50,
+      "answerable": 42,
+      "abstention_items": 8,
+      "correct": 26,
+      "accuracy": 0.619,
+      "accuracy_by_type": {
+        "knowledge-update": {
+          "n": 6,
+          "correct": 4,
+          "accuracy": 0.6667
+        },
+        "multi-session": {
+          "n": 11,
+          "correct": 8,
+          "accuracy": 0.7273
+        },
+        "single-session-assistant": {
+          "n": 5,
+          "correct": 0,
+          "accuracy": 0.0
+        },
+        "single-session-preference": {
+          "n": 3,
+          "correct": 0,
+          "accuracy": 0.0
+        },
+        "single-session-user": {
+          "n": 6,
+          "correct": 6,
+          "accuracy": 1.0
+        },
+        "temporal-reasoning": {
+          "n": 11,
+          "correct": 8,
+          "accuracy": 0.7273
+        }
+      },
+      "abstained_total": 20,
+      "abstention_recall": 0.875,
+      "abstention_precision": 0.35,
+      "hallucination_rate": 0.125,
+      "over_refusal_rate": 0.3095,
+      "mean_latency_ms": 16079.4,
+      "mean_prompt_tokens": 260.1,
+      "judge_methods": {
+        "llm-judge": 50
+      },
+      "judge_failures": 0,
+      "errors": 0,
+      "truncated": 0,
+      "token_estimator": "chars/4 heuristic (no tokenizer dependency; comparable across systems, not exact)"
+    },
+    "fullcontext": {
+      "system": "fullcontext",
+      "n": 50,
+      "answerable": 42,
+      "abstention_items": 8,
+      "correct": 29,
+      "accuracy": 0.6905,
+      "accuracy_by_type": {
+        "knowledge-update": {
+          "n": 6,
+          "correct": 6,
+          "accuracy": 1.0
+        },
+        "multi-session": {
+          "n": 11,
+          "correct": 7,
+          "accuracy": 0.6364
+        },
+        "single-session-assistant": {
+          "n": 5,
+          "correct": 5,
+          "accuracy": 1.0
+        },
+        "single-session-preference": {
+          "n": 3,
+          "correct": 1,
+          "accuracy": 0.3333
+        },
+        "single-session-user": {
+          "n": 6,
+          "correct": 6,
+          "accuracy": 1.0
+        },
+        "temporal-reasoning": {
+          "n": 11,
+          "correct": 4,
+          "accuracy": 0.3636
+        }
+      },
+      "abstained_total": 10,
+      "abstention_recall": 0.875,
+      "abstention_precision": 0.7,
+      "hallucination_rate": 0.125,
+      "over_refusal_rate": 0.0714,
+      "mean_latency_ms": 10119.2,
+      "mean_prompt_tokens": 123090.6,
+      "judge_methods": {
+        "llm-judge": 50
+      },
+      "judge_failures": 0,
+      "errors": 0,
+      "truncated": 10,
+      "token_estimator": "chars/4 heuristic (no tokenizer dependency; comparable across systems, not exact)"
+    },
+    "rag": {
+      "system": "rag",
+      "n": 50,
+      "answerable": 42,
+      "abstention_items": 8,
+      "correct": 27,
+      "accuracy": 0.6429,
+      "accuracy_by_type": {
+        "knowledge-update": {
+          "n": 6,
+          "correct": 6,
+          "accuracy": 1.0
+        },
+        "multi-session": {
+          "n": 11,
+          "correct": 7,
+          "accuracy": 0.6364
+        },
+        "single-session-assistant": {
+          "n": 5,
+          "correct": 5,
+          "accuracy": 1.0
+        },
+        "single-session-preference": {
+          "n": 3,
+          "correct": 1,
+          "accuracy": 0.3333
+        },
+        "single-session-user": {
+          "n": 6,
+          "correct": 6,
+          "accuracy": 1.0
+        },
+        "temporal-reasoning": {
+          "n": 11,
+          "correct": 2,
+          "accuracy": 0.1818
+        }
+      },
+      "abstained_total": 17,
+      "abstention_recall": 1.0,
+      "abstention_precision": 0.4706,
+      "hallucination_rate": 0.0,
+      "over_refusal_rate": 0.2143,
+      "mean_latency_ms": 6157.2,
+      "mean_prompt_tokens": 13144.0,
+      "judge_methods": {
+        "llm-judge": 50
+      },
+      "judge_failures": 0,
+      "errors": 0,
+      "truncated": 0,
+      "token_estimator": "chars/4 heuristic (no tokenizer dependency; comparable across systems, not exact)"
+    }
+  },
+  "skipped": {},
+  "records_file": "eval\\results\\longmemeval-50.records.jsonl"
+}

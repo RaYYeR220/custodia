@@ -30,7 +30,9 @@ data/
 eval/data/raw/
 eval/data/*.json
 !eval/data/manifest.json
-eval/results/
+# result summaries are committed; the per-question records are not (size)
+eval/results/*.records.jsonl
+eval/results/*.log
 tests/_cache/
 
 # notes the dev server regenerates on every start
