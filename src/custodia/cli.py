@@ -200,6 +200,46 @@ def ask(
 
 
 @app.command()
+def evidence(
+    question: str = typer.Argument(..., help="what to look for"),
+    corpus: str = typer.Option(None),
+    as_of: str = typer.Option(None, "--as-of", help="ISO date; retrieve as memory stood then"),
+    paths: bool = typer.Option(False, "--paths", help="show the chain the engine walked to each fact"),
+    limit: int = typer.Option(10, help="how many facts to show"),
+) -> None:
+    """Show the supporting facts for a question without answering it.
+
+    The retrieval half on its own: what memory found, how strongly, and by which
+    route. Useful when you want to reason over the evidence yourself, and when
+    you want to see why an answer was or was not possible.
+    """
+    from custodia.lexical import LexicalIndex
+    from custodia.llm import LLM
+    from custodia.retrieve import Retriever
+
+    name = _corpus(corpus)
+    client = _client()
+    retriever = Retriever(client, name, index=LexicalIndex.build(client, name), llm=LLM())
+    warrant = retriever.warrant(question, as_of=_moment(as_of), k=limit)
+
+    console.print(f"[dim]seeds[/] entities: {', '.join(warrant.seeds['entities']) or 'none'}")
+    console.print(f"[dim]seeds[/] terms: {', '.join(warrant.seeds['terms'][:10]) or 'none'}")
+    console.print(
+        f"[dim]{warrant.paths_examined} paths examined · {warrant.facts_considered} facts considered "
+        f"· {len(warrant.evidence)} met the evidence floor · {warrant.elapsed_ms:.0f} ms[/]\n"
+    )
+    for ev in warrant.evidence[:limit]:
+        console.print(f"[cyan]{ev.score:.2f}[/]  {ev.text}")
+        console.print(f"      [dim]{ev.tier} · {ev.sid} · {_stamp(ev.turn_ts or ev.valid_from)}[/]")
+        if paths and ev.path:
+            console.print(f"      [yellow]{'  ->  '.join(ev.path)}[/]")
+    if warrant.quarantined_seen:
+        console.print(
+            f"\n[red]{warrant.quarantined_seen} quarantined fact(s) retrieved and refused[/]"
+        )
+
+
+@app.command()
 def why(
     fact_id: int = typer.Argument(..., help="fact id from a citation"),
     corpus: str = typer.Option(None),

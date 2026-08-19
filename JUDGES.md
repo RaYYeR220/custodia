@@ -63,6 +63,15 @@ docker compose exec api custodia attack --tier owner \
   --question "What does Nora order at the coffee place?"
 ```
 
+**It shows its working.** The retrieval half on its own — seeds, how many paths
+the engine walked, and the chain that reached each fact:
+
+```bash
+docker compose exec api custodia evidence "Is Nora allergic to anything?" --paths
+```
+
+The last line reports how many quarantined facts retrieval passed over.
+
 ## 3. Where to look in the code
 
 | Claim | File |
