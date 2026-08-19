@@ -53,7 +53,7 @@ without the turn it was derived from, and the batch flusher writes the
 This is an invariant Custodia enforces, informed by the engine's write model. It
 is not one the engine imposes: the batch form `UNWIND $rows AS row MERGE (n {id:
 row.id})` can create a bare vertex, so the guarantee is ours to keep, and
-`custodia audit --orphans` exists to prove we kept it.
+`custodia audit` exists to prove we kept it.
 
 ## Trust tiers
 
@@ -87,9 +87,22 @@ Retrieval is a three-stage funnel and each stage is graph work.
    *chain* — fact, the turn that produced it, the session that turn sat in —
    rather than a bag of nodes to be re-joined client-side.
 3. **Resolution.** Chains are collapsed per fact. `SUPERSEDES` edges are followed
-   to the current head unless the question asked as-of a time, quarantined facts
-   are dropped, and the remainder is ranked on seed proximity, recency of
-   `valid_from`, tier and corroboration count.
+   to the current head unless the question asked as-of a time, and quarantined
+   facts are dropped -- but counted, so an answer can report how many poisoned
+   items its retrieval passed over.
+4. **Ranking.** Six weighted terms summing to one, so a score is directly
+   comparable to the evidence floor: lexical relevance (0.30), graph anchoring to
+   a seeded entity (0.15), path proximity (0.15), tier (0.15), recency rank
+   (0.15) and corroboration (0.10, saturating at three independent witnesses).
+
+   Lexical relevance and anchoring are separate terms deliberately, and it is the
+   one weighting worth arguing about. Anchoring alone does not discriminate: in a
+   corpus about one person every fact hangs off that person, every fact scores
+   identically on that term, and the ordering collapses onto recency. The lexical
+   term is what puts the drink fact above the gym fact for "what do I drink", so
+   it carries the larger weight. Recency is a *rank within the candidate set*
+   rather than an absolute age, which keeps it meaningful whether the corpus
+   spans a week or a decade.
 
 The output is a **warrant**: a bounded set of facts, each with its provenance
 chain and the timestamps that justify its position in time.
@@ -137,7 +150,9 @@ are fast rather than around the parts that are missing.
 
 * Writes are batched `UNWIND ... MERGE ... SET`, chunked under the 1024-row
   admission limit. Single-statement writes commit to object storage individually
-  and measure ~12/s; batched upserts measure ~1900/s on the same box.
+  and measure 11/s; batched upserts measure 5 100/s on the same idle box. Property
+  values are also length-limited — a string over ~32 KB fails the whole statement,
+  so the client clips at 32 000 characters with a visible marker.
 * Vertex ids are integers and *are* the identity, so ids are derived by hashing a
   namespaced key. Re-running an ingest rewrites the same vertices instead of
   duplicating them, which is also the crash-recovery story.

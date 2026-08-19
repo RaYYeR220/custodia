@@ -68,6 +68,16 @@ def _corpus(value: str | None) -> str:
     return value or settings().corpus
 
 
+def _principal(corpus: str) -> str:
+    """Whose memory this is, so first-person writes share one subject key."""
+    from custodia.ids import corpus_id
+
+    rows = _graph().run(
+        "MATCH (c:Corpus {id: $cid}) RETURN c.principal AS principal", cid=corpus_id(corpus)
+    )
+    return (rows[0].get("principal") if rows else "") or "user"
+
+
 @mcp.tool()
 def remember(
     text: str,
@@ -114,7 +124,9 @@ def remember(
         tier=parsed,
         origin=origin,
     )
-    ingestor = Ingestor(_graph(), name, policy=Policy())
+    from custodia.demo import extractor
+
+    ingestor = Ingestor(_graph(), name, policy=Policy(), extract=extractor(_principal(name)))
     ingestor.stage_session(sid, ts=now, idx=now, turns=[turn])
     report = ingestor.flush()
     _gates.pop(name, None)

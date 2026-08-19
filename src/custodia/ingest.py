@@ -50,6 +50,8 @@ from custodia.resolve import (
     reconcile,
     resolve_entities,
 )
+import logging
+
 from custodia.schema import (
     ACTIVE,
     OPEN_INTERVAL,
@@ -92,6 +94,9 @@ class IngestReport:
     def rows_per_second(self) -> float:
         rows = self.turns + self.facts + self.entities + self.edges
         return rows / (self.elapsed_ms / 1000) if self.elapsed_ms > 0 else 0.0
+
+
+log = logging.getLogger("custodia.ingest")
 
 
 class Ingestor:
@@ -215,6 +220,15 @@ class Ingestor:
 
         self.fold_entities()
         facts = list(self._facts.values())
+        if not facts and self.extract is None:
+            # every real caller wants extraction; forgetting to pass one writes a
+            # corpus of turns nobody can answer from, and does it silently
+            log.warning(
+                "%s: %d session(s) staged with no facts and no extractor - "
+                "pass extract= or call stage_facts()",
+                self.corpus,
+                len(self._sessions),
+            )
         missing = [f.key for f in facts if not self._provenance.get(f.key)]
         if missing:  # pragma: no cover - already guarded at stage time
             raise ValueError(f"{len(missing)} staged facts have no provenance: {missing[:3]}")
