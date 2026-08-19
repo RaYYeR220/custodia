@@ -1,0 +1,1 @@
+{"text": "```json\n{\n  \"answer\": \"The warrant does not contain information about Nora's blood type.\",\n  \"citations\": [],\n  \"sufficient\": false\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 2929, "completion_tokens": 662, "written_at": 1787163735}

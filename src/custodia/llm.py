@@ -326,8 +326,9 @@ class LLM:
         ``waited_ms`` counts every millisecond spent *not* sending - client-side
         pacing and a provider's own ``Retry-After`` alike - and ``throttled``
         counts the 429s behind it. A report that omits them can describe a run
-        that spent half its wall clock queueing as if it were a measurement of
-        the system.
+        that spent half its time queueing as if it were a measurement of the
+        system. It is summed across worker threads, so under ``batch_json`` it
+        is thread-time and will exceed the wall clock rather than track it.
         """
         with self._lock:
             return dict(self._usage)

@@ -22,9 +22,9 @@ from custodia.config import REPO_ROOT
 from custodia.hydra import HydraClient
 from custodia.schema import Tier, Turn
 
-DEMO_DIR = Path(__file__).resolve().parents[2] / "demo"
-if not DEMO_DIR.exists():  # installed rather than run from a checkout
-    DEMO_DIR = REPO_ROOT / "demo"
+DEMO_DIR = REPO_ROOT / "demo"
+if not DEMO_DIR.exists():  # running straight from a source tree
+    DEMO_DIR = Path(__file__).resolve().parents[2] / "demo"
 
 #: turns whose content arrived from outside the conversation are not conversation
 _EXTERNAL_ORIGINS = ("http://", "https://", "shared-document://", "file://")

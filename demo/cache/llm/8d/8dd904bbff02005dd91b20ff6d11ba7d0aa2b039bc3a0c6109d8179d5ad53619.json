@@ -1,0 +1,1 @@
+{"text": "```json\n{\"supports\": true, \"reason\": \"matches the statement in the answer exactly\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 355, "completion_tokens": 65, "written_at": 1787163782}

@@ -97,6 +97,11 @@ def claimed(batch: list[dict[str, str]]) -> list[int]:
     return [int(n) for n in re.findall(r"#(\d+)", line)]
 
 
+def _system_prompt() -> str:
+    """The system message the extractor actually sends."""
+    return prompts.build_extract_messages([turn(0, "hello")], {0})[0]["content"]
+
+
 def as_epoch(text: str) -> int:
     return int(datetime.fromisoformat(text).replace(tzinfo=timezone.utc).timestamp())
 
@@ -384,6 +389,73 @@ def test_the_prompt_carries_the_vocabulary_it_enforces():
     system = llm.batches[0][0]["content"]
     for name, arity in PREDICATES.items():
         assert f"{name}={arity}" in system
+
+
+def test_the_prompt_asks_for_the_episodic_layer_too():
+    """The vocabulary names recurring attributes; it must not read as a filter.
+
+    A closed slot list is exactly the kind of instruction a model over-reads: it
+    starts treating "does this fit a slot?" as the test for whether something is
+    a fact at all, and every amount, purchase and appointment falls out.
+    """
+    system = _system_prompt()
+
+    assert "naming convention, not a filter" in system
+    for episodic in ("what they paid", "what they bought", "an appointment", "a quantity"):
+        assert episodic in system
+
+
+def test_the_prompt_requires_figures_verbatim():
+    system = _system_prompt()
+
+    assert "convert, total or paraphrase a figure" in system
+    assert "3-month supply" in system
+
+
+def test_the_prompt_forbids_inventing_attributes():
+    system = _system_prompt()
+
+    assert "Say what the text says and nothing more" in system
+    assert "a name next to" in system and "is a name, not a dog" in system
+
+
+def test_the_prompt_separates_the_two_voices():
+    system = _system_prompt()
+
+    assert "Mine the user's turns exhaustively" in system
+    assert "Never its recommendations" in system
+
+
+def test_worked_examples_travel_with_the_prompt():
+    assert prompts.EXTRACT_EXAMPLES in _system_prompt()
+    assert "$50" in prompts.EXTRACT_EXAMPLES and "$25" in prompts.EXTRACT_EXAMPLES
+
+
+def test_a_long_assistant_turn_is_clipped():
+    advice = "Here are some options. " + "A" * 3000
+    rendered = prompts.render_turn(turn(1, advice, role="assistant"))
+
+    assert "[... assistant message trimmed]" in rendered
+    assert rendered.startswith("#1 [assistant]")
+    assert "Here are some options." in rendered
+    assert len(rendered) < len(advice)
+
+
+@pytest.mark.parametrize(
+    "role,origin",
+    [("user", ""), ("tool", "shared-document://x"), ("assistant", "shared-document://x")],
+)
+def test_user_and_sourced_turns_are_never_clipped(role, origin):
+    """Clipping is a tax on generic advice, and only the assistant writes that.
+
+    A user turn is where the facts are, and a quoted document is where an attack
+    would be - truncating either would hide what the pipeline exists to handle.
+    """
+    text = "B" * 4000
+    rendered = prompts.render_turn(turn(1, text, role=role, origin=origin))
+
+    assert text in rendered
+    assert "trimmed" not in rendered
 
 
 def test_a_value_that_has_ended_is_not_given_a_slot_of_its_own():

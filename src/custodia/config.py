@@ -15,7 +15,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+#: Where the project's data files live: the demo corpus, the shipped response
+#: cache, the evaluation results. Running from a checkout this is the repository
+#: root; installed into site-packages it is not, so the container sets
+#: ``CUSTODIA_HOME`` and everything else derives from here.
+_CHECKOUT_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(os.environ.get("CUSTODIA_HOME") or _CHECKOUT_ROOT)
 
 
 def _env(name: str, default: str = "") -> str:

@@ -1,6 +1,17 @@
 name: custodia
 
 services:
+  # The graph image runs as uid 10001, and a fresh named volume belongs to root,
+  # so the engine cannot create its writer leases. One busybox pass fixes the
+  # ownership before anything else starts.
+  volumes-init:
+    image: busybox:1.37
+    container_name: custodia-volumes-init
+    command: sh -c "mkdir -p /store /cache && chown -R 10001:10001 /store /cache"
+    volumes:
+      - hydra-store:/store
+      - hydra-cache:/cache
+
   # HydraDB: object-store-native graph engine. Bolt on 7687, JSON API on 8443,
   # health and metrics on 9090. The store lives in a named volume so a restart
   # -- or a deliberate kill -- keeps the memory that was already committed.
@@ -32,12 +43,17 @@ services:
       - hydra-store:/data/store
       - hydra-cache:/data/cache
       - ./docker/auth-token:/data/auth-token:ro
+    depends_on:
+      volumes-init:
+        condition: service_completed_successfully
+    # the image ships no curl, so probe the Bolt port with bash's own /dev/tcp.
+    # CMD-SHELL would run this under dash, which has no /dev/tcp - hence CMD+bash.
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9090/metrics >/dev/null || exit 1"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/7687"]
       interval: 5s
       timeout: 3s
-      retries: 30
-      start_period: 5s
+      retries: 40
+      start_period: 10s
 
   api:
     build:
@@ -50,6 +66,7 @@ services:
       HYDRA_URI: bolt://hydradb:7687
       HYDRA_TOKEN: local-development-token-32-bytes
       CUSTODIA_CORPUS: demo
+      CUSTODIA_HOME: /app
       CUSTODIA_CACHE_DIR: /app/data/cache
       # no key configured -> the shipped response cache serves the demo
       CUSTODIA_LLM_BASE_URL: ${CUSTODIA_LLM_BASE_URL:-https://openrouter.ai/api/v1}
