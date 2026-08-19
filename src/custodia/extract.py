@@ -45,8 +45,9 @@ from custodia.schema import OPEN_INTERVAL, OWNER_ROLES, PREDICATES, Tier, Turn
 
 log = logging.getLogger("custodia.extract")
 
-#: a window of six turns with a long quoted document in it still fits comfortably
-EXTRACT_MAX_TOKENS = 3000
+#: a window whose user turns each carry three or four claims needs room to list
+#: them all; truncated JSON is a lost window, and windows are cheap
+EXTRACT_MAX_TOKENS = 4000
 
 #: the rules extractor is a floor, not a model. Its facts say so.
 RULES_CONF = 0.45
@@ -65,7 +66,6 @@ PREDICATE_SYNONYMS: dict[str, str] = {
     "has_usual_order": "usual_order",
     "has_usual": "usual_order",
     "usual": "usual_order",
-    "orders": "usual_order",
     "prefers_drink": "usual_order",
     # a slot the vocabulary used to carry: two single-valued homes for one idea
     # is how a supersession goes missing, so anything still spelling it the old

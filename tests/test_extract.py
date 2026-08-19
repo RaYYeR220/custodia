@@ -333,7 +333,7 @@ def test_the_principal_is_not_added_as_an_entity():
     "written,slot",
     [
         ("has_usual_order", "usual_order"),
-        ("orders", "usual_order"),
+        ("preferred_drink", "usual_order"),
         ("prefers_drink", "usual_order"),
         ("holds_title", "job_title"),
         ("title", "job_title"),
@@ -352,6 +352,15 @@ def test_the_principal_is_not_added_as_an_entity():
 def test_synonyms_fold_onto_the_schema_vocabulary(written, slot):
     assert canonical_predicate(written) in PREDICATES
     assert canonical_predicate(written) == slot
+
+
+@pytest.mark.parametrize("written", ["orders", "paid", "bought", "cost", "borrowed"])
+def test_episodic_predicates_are_left_free_form(written):
+    """Purchases and payments have no slot, and forcing them into one is worse
+    than leaving them out: `orders` looks like `usual_order` and would retire a
+    true fact every time the person bought something."""
+    assert canonical_predicate(written) == written
+    assert not is_single_valued(canonical_predicate(written))
 
 
 def test_an_unknown_predicate_survives_as_free_form():

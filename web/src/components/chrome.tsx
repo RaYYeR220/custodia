@@ -82,7 +82,7 @@ export function Masthead({
             <h1 className="display text-[2.6rem] leading-none tracking-tight text-bone">
               Custodia
             </h1>
-            <p className="text-bone-faint mt-2 text-[12.5px] max-w-[54ch]">
+            <p className="note mt-2 max-w-[68ch]">
               Agent memory with a chain of custody. Nothing is remembered without its
               source, nothing is answered without a warrant.
             </p>

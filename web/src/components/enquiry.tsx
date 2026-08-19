@@ -270,11 +270,35 @@ export function Enquiry({ corpus }: { corpus?: string }) {
           </div>
 
           {!verdict && (
-            <p className="mt-4 text-bone-faint text-[12.5px] leading-relaxed">
-              Every answer is assembled from facts, and every fact is filed against the
-              turn that produced it. Ask something and the cards that were used appear
-              here, with the session, the date and the channel each one arrived on.
-            </p>
+            <>
+              <p className="mt-4 note">
+                Every answer is assembled from facts, and every fact is filed against the
+                turn that produced it. Ask something and the cards that were used appear
+                here, with the session, the date and the channel each one arrived on.
+              </p>
+              {sessions.length > 0 && (
+                <div className="mt-6">
+                  <div className="flex items-baseline justify-between">
+                    <span className="label">What memory holds</span>
+                    <span className="label">{sessions.length} sessions</span>
+                  </div>
+                  <ol className="mt-3 border-l border-rule-soft">
+                    {sessions.map((s) => (
+                      <li key={s.sid} className="relative pl-4 py-1.5">
+                        <span className="absolute left-0 top-3.5 -translate-x-1/2 w-1.5 h-1.5 bg-brass-dim rounded-full" />
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="text-[12.5px] text-bone-dim truncate">{s.title || s.sid}</span>
+                          <span className="label shrink-0">{stamp(s.ts)}</span>
+                        </div>
+                        <span className="note">
+                          {s.facts} fact{s.facts === 1 ? "" : "s"}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+            </>
           )}
 
           <div className="mt-4 space-y-3 max-h-[calc(100vh-10rem)] overflow-y-auto pr-1">
