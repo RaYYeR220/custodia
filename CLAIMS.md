@@ -26,6 +26,7 @@ difference without having to read the code first.
 | A refused write is kept, with the rule that refused it | **demonstrated** | `custodia audit`, the refusal ledger in the web client |
 | The guard discriminates rather than blanket-refusing | **demonstrated** | the negative control: the same record updated by the principal is accepted, and the answer moves |
 | Retrieval returns evidence chains, not just matching text | **demonstrated** | `custodia evidence "…" --paths` prints the hop sequence the engine walked |
+| An advisory answer is labelled as such and still cites what shaped it | **demonstrated** | `Verdict.kind` is `grounded`; `tests/test_gate.py` covers the label, the relevance check, invented citations, and the strict mode that refuses the kind entirely |
 | The whole walkthrough runs with no API key | **measured** | `CUSTODIA_LLM_API_KEY= CUSTODIA_CACHE_ONLY=true custodia verify` → 8/8 |
 
 ## HydraDB
@@ -65,6 +66,10 @@ system which refuses everything cannot score well on it.
   so the system runs without credentials, and it is labelled wherever it runs.
 - **No benchmark leaderboard position.** We ran a stratified sample against two
   baselines we implemented ourselves; that is a comparison, not a ranking.
+- **A `grounded` answer is not a recalled fact.** It is advice constrained by the
+  facts it cites. Every claim it makes *about the person* is cited, but the advice
+  itself is the model's. We do not claim otherwise, which is why the kind is on the
+  verdict, in the API payload, in the CLI and in the web client.
 - **No claim of a formal guarantee.** The provenance invariant is enforced by our
   writer, not by the engine — `custodia audit` exists precisely because a
   guarantee we hold ourselves should be checkable by someone who doubts it.

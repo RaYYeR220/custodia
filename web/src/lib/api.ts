@@ -48,6 +48,7 @@ export interface Verdict {
   latency_ms: number;
   model: string;
   verified: number;
+  kind: "recall" | "grounded" | "";
   checks: string[];
   corpus?: string;
   elapsed_ms?: number;

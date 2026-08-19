@@ -173,7 +173,9 @@ export function Enquiry({ corpus }: { corpus?: string }) {
           <div className="mt-8" key={`${verdict.warrant.question}-${verdict.warrant.as_of}`}>
             {verdict.answered ? (
               <div className="file-in">
-                <span className="label">On the record</span>
+                <span className="label">
+                  {verdict.kind === "grounded" ? "Shaped by memory" : "On the record"}
+                </span>
                 <p className="statement mt-3 text-bone">{verdict.answer}</p>
                 <div className="flex flex-wrap items-center gap-2 mt-5">
                   <span className="label">cited</span>
@@ -191,6 +193,14 @@ export function Enquiry({ corpus }: { corpus?: string }) {
                       {i + 1} · {e.session}
                     </button>
                   ))}
+                  {verdict.kind === "grounded" && (
+                    <Pill
+                      tone="brass"
+                      title="nothing in memory states this answer; the cited facts shaped it"
+                    >
+                      advice, not recall
+                    </Pill>
+                  )}
                   {verdict.verified > 0 && (
                     <Pill tone="good" title="citations that survived the second-pass entailment check">
                       {verdict.verified} verified

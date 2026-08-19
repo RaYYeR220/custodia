@@ -122,6 +122,26 @@ What makes the refusal real is that the check is code, not instruction:
 * malformed JSON, a timeout, or a provider error resolves to abstention, not to
   a best guess. The failure path and the "I don't know" path are the same path.
 
+### Two kinds of answer
+
+Not every question asks memory to recall something. "What is my usual coffee
+order" does; "what should I bake for colleagues" does not — nothing in memory
+states the answer, but a fact about a cake that went down well last time belongs
+in it. Refusing the second kind is as wrong as inventing the first.
+
+So the gate accepts two kinds, and the model must declare which it is giving:
+
+| kind | admitted when | checked by |
+|---|---|---|
+| `recall` | a cited fact states the answer | entailment: does this fact carry part of the answer |
+| `grounded` | the question asked for advice and cited facts shaped it | relevance: would an adviser change what they said because of this fact |
+
+Both are held to the same citation rule — every id must be in the warrant — and
+both refuse when nothing survives their check. A `grounded` answer is labelled
+everywhere it surfaces, because an unlabelled one would quietly widen what
+"answered" means. Strict mode (`Gate(grounded=False)`) turns it off, which is the
+setting to use when measuring abstention on its own.
+
 An answer that passes is written back as `(:Answer)-[:CITES]->(:Fact)`, so the
 graph records not only what memory held but what was said from it.
 

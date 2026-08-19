@@ -91,7 +91,15 @@ def _stamp(ts: int) -> str:
 
 def _print_verdict(verdict: Any) -> None:
     if verdict.answered:
-        console.print(Panel(verdict.answer, title="answer", border_style="green"))
+        grounded = getattr(verdict, "kind", "") == "grounded"
+        console.print(
+            Panel(
+                verdict.answer,
+                title="advice shaped by memory" if grounded else "answer",
+                subtitle="nothing stored states this; the cited facts shaped it" if grounded else None,
+                border_style="yellow" if grounded else "green",
+            )
+        )
         table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
         table.add_column("fact", style="cyan", no_wrap=True)
         table.add_column("claim")
