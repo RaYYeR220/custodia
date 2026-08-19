@@ -57,6 +57,14 @@ log = logging.getLogger("custodia.retrieve")
 SEED_ARMS = 24
 #: how many single-id arms go into one batched read
 FETCH_ARMS = 32
+#: edge reads emit two arms per id, so they take half as many ids per statement
+EDGE_ARMS = 16
+#: how far a supersession chain is followed past the facts already in hand
+SUPERSESSION_ROUNDS = 4
+#: more id-arms than this and a whole-corpus read may be the cheaper shape...
+SCAN_ARMS = 8
+#: ...but only for a corpus small enough that reading all of it stays bounded
+SCAN_BUDGET = 5000
 #: shortest candidate term allowed to seed a `STARTS WITH` match
 PREFIX_MIN = 4
 #: longest noun phrase the deterministic seeder will propose
@@ -103,6 +111,9 @@ _FACT_FIELDS = (
     "f.vfrom AS vfrom, f.vto AS vto, f.ing AS ing, f.conf AS conf, f.sid AS sid, "
     "f.sidx AS sidx, f.tidx AS tidx"
 )
+
+_EDGE_FIELDS = "RETURN a.id AS newer, b.id AS older"
+_PAIR_FIELDS = "RETURN a.id AS src, b.id AS dst"
 
 _PROV_FIELDS = (
     "f.id AS fid, t.text AS turn_text, t.ts AS turn_ts, t.role AS turn_role, t.sid AS turn_sid"
@@ -314,6 +325,7 @@ class Retriever:
         self.index = index
         self.llm = llm
         self.min_tier = Tier.parse(min_tier)
+        self._fact_count: int | None = None
 
     # ------------------------------------------------------------------ seeding
 
@@ -560,10 +572,37 @@ class Retriever:
             if not props or props.get("corpus") != self.corpus:
                 del candidates[fid]
 
+    def _corpus_facts(self) -> int:
+        """How many facts this corpus holds. Cached: it only picks a strategy."""
+        if self._fact_count is None:
+            rows = self.client.run(
+                f"MATCH (f:{schema.FACT} {{corpus: $corpus}}) RETURN count(*) AS n",
+                corpus=self.corpus,
+            )
+            self._fact_count = int(rows[0]["n"]) if rows else 0
+        return self._fact_count
+
     def _fetch_facts(self, ids: Iterable[int]) -> dict[int, dict[str, Any]]:
-        """Read facts by id. No ``IN``, so this is a batched ``UNION`` of arms."""
+        """Read facts by id. No ``IN``, so this is a batched ``UNION`` of arms.
+
+        Except when it is cheaper not to be. A ``UNION`` arm costs ~20 ms on this
+        engine whatever it returns, so twenty-five arms is half a second, while
+        reading every fact in a small corpus in one statement is ~30 ms. Below
+        :data:`SCAN_BUDGET` facts the whole corpus is read and filtered here;
+        above it the per-id form wins and keeps the read proportional to the
+        question instead of to the memory.
+        """
         wanted = _dedupe_ints(ids)
         out: dict[int, dict[str, Any]] = {}
+        if len(wanted) > SCAN_ARMS and self._corpus_facts() <= SCAN_BUDGET:
+            keep = set(wanted)
+            for row in self.client.run(
+                f"MATCH (f:{schema.FACT} {{corpus: $corpus}}) RETURN {_FACT_FIELDS}",
+                corpus=self.corpus,
+            ):
+                if row.get("id") is not None and int(row["id"]) in keep:
+                    out[int(row["id"])] = dict(row)
+            return out
         for chunk in _chunks(wanted, FETCH_ARMS):
             arms = []
             params: dict[str, Any] = {}
@@ -591,7 +630,9 @@ class Retriever:
         contains the instant is. Neither overwrites the other, which is the whole
         point of keeping validity apart from ingestion time.
         """
-        newer, older = self._supersession()
+        if not candidates:
+            return [], 0
+        newer, older = self._supersession(list(candidates))
 
         # every member of every candidate's lineage may end up being the fact the
         # question wants, so their properties are fetched once, up front, rather
@@ -638,21 +679,51 @@ class Retriever:
             keep.append(cand)
         return keep, quarantined
 
-    def _supersession(self) -> tuple[dict[int, int], dict[int, int]]:
-        """``{displaced: replacement}`` and its inverse, for this corpus."""
-        rows = self.client.run(
-            f"MATCH (a:{schema.FACT} {{corpus: $corpus}})"
-            f"-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) "
-            "RETURN a.id AS newer, b.id AS older",
-            corpus=self.corpus,
-        )
+    def _supersession(self, ids: Sequence[int]) -> tuple[dict[int, int], dict[int, int]]:
+        """``{displaced: replacement}`` and its inverse, for the facts in play.
+
+        Targeted by id rather than scanned over the corpus, and this is the one
+        place where the difference is dramatic. A corpus-wide
+        ``MATCH (a:Fact {corpus: $c})-[:SUPERSEDES]->(b:Fact)`` measures ~500 ms
+        however few edges come back, because the cost is walking every Fact's
+        edge list; the same edges fetched by id through a batched ``UNION`` are
+        index lookups and measure ~40 ms. It also makes the read scale with the
+        question rather than with the memory.
+
+        Both directions go in one statement - the two arms return the same two
+        columns - and the frontier is expanded until it closes, so a chain that
+        reaches further than the traversal did is still followed to its head.
+        """
         newer: dict[int, int] = {}
         older: dict[int, int] = {}
-        for row in rows:
-            if row.get("newer") is None or row.get("older") is None:
-                continue
-            newer[int(row["older"])] = int(row["newer"])
-            older[int(row["newer"])] = int(row["older"])
+        frontier = _dedupe_ints(ids)
+        seen = set(frontier)
+        for _ in range(SUPERSESSION_ROUNDS):
+            if not frontier:
+                break
+            reached: list[int] = []
+            for chunk in _chunks(frontier, EDGE_ARMS):
+                arms: list[str] = []
+                params: dict[str, Any] = {}
+                for i, fid in enumerate(chunk):
+                    params[f"p{i}"] = int(fid)
+                    arms.append(
+                        f"MATCH (a:{schema.FACT} {{id: $p{i}}})"
+                        f"-[:{schema.SUPERSEDES}]->(b:{schema.FACT}) {_EDGE_FIELDS}"
+                    )
+                    arms.append(
+                        f"MATCH (a:{schema.FACT})-[:{schema.SUPERSEDES}]->"
+                        f"(b:{schema.FACT} {{id: $p{i}}}) {_EDGE_FIELDS}"
+                    )
+                for row in self.client.run(" UNION ".join(arms), **params):
+                    if row.get("newer") is None or row.get("older") is None:
+                        continue
+                    up, down = int(row["newer"]), int(row["older"])
+                    newer[down] = up
+                    older[up] = down
+                    reached.extend((up, down))
+            frontier = [f for f in _dedupe_ints(reached) if f not in seen]
+            seen.update(frontier)
         return newer, older
 
     # ------------------------------------------------------------------ ranking
@@ -667,7 +738,7 @@ class Retriever:
         if not candidates:
             return []
 
-        corroboration = self._corroboration()
+        corroboration = self._corroboration([c.fid for c in candidates])
         stamps = sorted({int(c.props.get("vfrom") or 0) for c in candidates})
         spread = max(1, len(stamps) - 1)
         recency_of = {stamp: i / spread for i, stamp in enumerate(stamps)}
@@ -708,24 +779,36 @@ class Retriever:
         out.sort(key=lambda e: (-e.score, e.hops, -e.valid_from, e.fid))
         return out
 
-    def _corroboration(self) -> dict[int, int]:
-        """How many independent facts back each fact, counting both directions.
+    def _corroboration(self, ids: Sequence[int]) -> dict[int, int]:
+        """How many independent facts back each candidate, counting both ways.
 
-        One read for the whole corpus: `CORROBORATES` is sparse, and thirty
-        single-id arms would cost more than the edge list does.
+        Fetched by id for the same reason as the supersession edges: an edge-list
+        scan is priced by the size of the corpus and this is priced by the size
+        of the question. Edges are de-duplicated client-side because an edge
+        between two candidates comes back from both of their arms.
         """
         counts: dict[int, int] = {}
-        rows = self.client.run(
-            f"MATCH (a:{schema.FACT} {{corpus: $corpus}})"
-            f"-[:{schema.CORROBORATES}]->(b:{schema.FACT}) "
-            "RETURN a.id AS src, b.id AS dst",
-            corpus=self.corpus,
-        )
-        for row in rows:
-            for key in ("src", "dst"):
-                value = row.get(key)
-                if value is not None:
-                    counts[int(value)] = counts.get(int(value), 0) + 1
+        edges: set[tuple[int, int]] = set()
+        for chunk in _chunks(_dedupe_ints(ids), EDGE_ARMS):
+            arms: list[str] = []
+            params: dict[str, Any] = {}
+            for i, fid in enumerate(chunk):
+                params[f"p{i}"] = int(fid)
+                arms.append(
+                    f"MATCH (a:{schema.FACT} {{id: $p{i}}})"
+                    f"-[:{schema.CORROBORATES}]->(b:{schema.FACT}) {_PAIR_FIELDS}"
+                )
+                arms.append(
+                    f"MATCH (a:{schema.FACT})-[:{schema.CORROBORATES}]->"
+                    f"(b:{schema.FACT} {{id: $p{i}}}) {_PAIR_FIELDS}"
+                )
+            for row in self.client.run(" UNION ".join(arms), **params):
+                if row.get("src") is None or row.get("dst") is None:
+                    continue
+                edges.add((int(row["src"]), int(row["dst"])))
+        for src, dst in edges:
+            counts[src] = counts.get(src, 0) + 1
+            counts[dst] = counts.get(dst, 0) + 1
         return counts
 
     # -------------------------------------------------------------- provenance

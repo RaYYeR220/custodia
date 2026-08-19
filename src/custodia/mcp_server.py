@@ -212,14 +212,16 @@ def forget(fact_id: int, reason: str, corpus: str | None = None) -> dict[str, An
     name = _corpus(corpus)
     client = _graph()
     rows = client.run(
-        "MATCH (f:Fact) WHERE f.id = $fid AND f.corpus = $corpus RETURN f.text AS text, f.status AS status",
+        # the id belongs in the pattern, not in WHERE: as a pattern property it is
+        # a vertex lookup, as a predicate it is a label scan
+        "MATCH (f:Fact {id: $fid}) WHERE f.corpus = $corpus RETURN f.text AS text, f.status AS status",
         fid=fact_id,
         corpus=name,
     )
     if not rows:
         return {"ok": False, "error": "no such fact in this corpus"}
     client.run(
-        "MATCH (f:Fact) WHERE f.id = $fid SET f.status = $status, f.qreason = $reason, f.vto = $now",
+        "MATCH (f:Fact {id: $fid}) SET f.status = $status, f.qreason = $reason, f.vto = $now",
         fid=fact_id,
         status=schema.RETRACTED,
         reason=reason,

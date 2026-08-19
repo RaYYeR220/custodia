@@ -208,7 +208,7 @@ def why(
     from custodia.audit import Auditor
 
     chain = Auditor(_client(), _corpus(corpus)).explain(fact_id)
-    if not chain:
+    if not chain.get("found"):
         console.print("[red]no such fact in this corpus[/]")
         raise typer.Exit(code=1)
     console.print_json(data=chain)
@@ -310,7 +310,10 @@ def attack(
         tier=parsed,
         origin="cli-attack",
     )
-    ingestor = Ingestor(client, name, policy=Policy())
+    from custodia.demo import extractor, load_corpus
+
+    principal = load_corpus().get("principal", "user") if name == "demo" else "user"
+    ingestor = Ingestor(client, name, policy=Policy(), extract=extractor(principal))
     ingestor.stage_session(sid, ts=now, idx=9_999, turns=[turn])
     report = ingestor.flush()
     console.print(

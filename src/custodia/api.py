@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from custodia import __version__, schema
 from custodia.config import settings
 from custodia.hydra import HydraClient, HydraError
+from custodia.ids import corpus_id
 
 app = FastAPI(
     title="Custodia",
@@ -77,6 +78,12 @@ def invalidate(corpus: str) -> None:
 
 def _corpus(value: str | None) -> str:
     return value or settings().corpus
+
+
+def _principal(corpus: str) -> str:
+    """Whose memory this is, so extracted first-person claims share one subject."""
+    rows = graph().run("MATCH (c:Corpus {id: $cid}) RETURN c.principal AS principal", cid=corpus_id(corpus))
+    return (rows[0].get("principal") if rows else "") or "user"
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +236,7 @@ def fact(fact_id: int, corpus: str | None = None) -> dict[str, Any]:
     from custodia.audit import Auditor
 
     chain = Auditor(graph(), _corpus(corpus)).explain(fact_id)
-    if not chain:
+    if not chain.get("found"):
         raise HTTPException(status_code=404, detail="no such fact in this corpus")
     return chain
 
@@ -387,7 +394,9 @@ def attack(req: AttackRequest) -> dict[str, Any]:
         tier=tier,
         origin=req.origin,
     )
-    ingestor = Ingestor(graph(), name, policy=Policy())
+    from custodia.demo import extractor
+
+    ingestor = Ingestor(graph(), name, policy=Policy(), extract=extractor(_principal(name)))
     ingestor.stage_session(sid, ts=now, idx=9_999, turns=[turn])
     report = ingestor.flush()
     invalidate(name)

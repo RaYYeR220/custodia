@@ -20,7 +20,7 @@ from typing import Any, Iterator
 import pytest
 
 from custodia import ids, schema
-from custodia.hydra.client import HydraClient
+from custodia.hydra.client import HydraClient, HydraError
 from custodia.ingest import Ingestor, IngestReport, ingest_sessions
 from custodia.policy import Policy
 from custodia.resolve import canonical_key
@@ -611,6 +611,29 @@ def test_write_order_follows_the_dependency_order(recorder: _Recorder) -> None:
     ]
 
 
+def test_every_vertex_is_written_before_any_edge(recorder: _Recorder) -> None:
+    """HydraDB fails a whole edge batch on one missing endpoint, so ordering is
+    not a preference. Every edge endpoint must already be a written vertex."""
+    ingest_sessions(recorder, "t", SESSIONS, extract=scripted_extract)
+
+    written = {int(row["id"]) for rows in recorder.nodes.values() for row in rows}
+    for rel, rows in recorder.edges.items():
+        for row in rows:
+            assert row["s"] in written, f"{rel} source {row['s']} was never written"
+            assert row["d"] in written, f"{rel} destination {row['d']} was never written"
+
+
+def test_an_edge_to_an_unwritten_vertex_is_refused_loudly(recorder: _Recorder) -> None:
+    ingestor = Ingestor(recorder, "t")
+    with pytest.raises(ValueError, match="references a vertex this flush did not write"):
+        ingestor._edges(schema.MENTIONS, schema.FACT, schema.ENTITY, [(1, 2)], known={1})
+
+
+def test_rejections_carry_the_session_they_came_from(recorder: _Recorder) -> None:
+    ingest_sessions(recorder, "t", SESSIONS, extract=scripted_extract)
+    assert [row["sid"] for row in recorder.nodes[schema.REJECTION]] == ["s1"]
+
+
 def test_default_extractor_is_imported_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing LLM must never break importing or using this module."""
     import custodia.ingest as module
@@ -912,6 +935,11 @@ def test_the_demo_shared_document_is_quarantined_and_recorded(
     )
     assert [r["sid"] for r in raised] == ["2026-06-30-shared-doc"]
     assert raised[0]["origin"] == "shared-document://marloe-onboarding-v3"
+    # the session is on the Rejection itself, so nothing has to infer it
+    own = graph.run(
+        f"MATCH (r:{schema.REJECTION}) WHERE r.corpus = $c RETURN r.sid AS sid", c=corpus
+    )
+    assert [row["sid"] for row in own] == ["2026-06-30-shared-doc"]
     assert raised[0]["tier"] == "external"
     assert raised[0]["rule"] == "instruction-injection"
 

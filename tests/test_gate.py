@@ -347,24 +347,42 @@ def test_the_verifier_confirms_a_good_citation(settings):
 
 def test_the_verifier_drops_a_citation_that_does_not_support_the_answer(settings):
     settings.verify_citations = True
-    llm = StubLLM(good_reply(GYM, MILK), {"supports": True}, {"supports": False})
+    llm = StubLLM(
+        good_reply(GYM, MILK),
+        {"supports": True, "reason": "states the gym"},
+        {"supports": False, "reason": "about a drink"},
+    )
     verdict = build(ambiguous(), llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is True
     assert verdict.citations == [GYM]
     assert verdict.verified == 1
+    assert f"{gate.CHECK_SUPPORTED}:dropped:{MILK}:about a drink" in verdict.checks
 
 
 def test_the_verifier_rejecting_every_citation_abstains(settings):
     settings.verify_citations = True
     warrant = warrant_of(evidence(GYM, "The user drinks oat milk."))
-    llm = StubLLM(good_reply(GYM), {"supports": False})
+    llm = StubLLM(good_reply(GYM), {"supports": False, "reason": "different topic"})
     verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
 
     assert verdict.answered is False
     assert verdict.abstained_because == gate.UNVERIFIED_CITATION
-    assert verdict.checks[-1] == gate.CHECK_SUPPORTED
+    assert gate.CHECK_SUPPORTED in verdict.checks
     assert verdict.verified == 0
+
+
+def test_a_dropped_citation_leaves_its_reason_in_the_trail(settings):
+    settings.verify_citations = True
+    warrant = warrant_of(evidence(GYM, "The user drinks oat milk."))
+    llm = StubLLM(good_reply(GYM), {"supports": False, "reason": "wrong, topic, only"})
+    verdict = build(warrant, llm, settings).ask("Which gym?", record=False)
+
+    trail = [c for c in verdict.checks if c.startswith(f"{gate.CHECK_SUPPORTED}:dropped:")]
+    assert trail == [f"{gate.CHECK_SUPPORTED}:dropped:{GYM}:wrong; topic; only"]
+    # the trail is stored comma-joined on the Answer vertex, so no entry may
+    # contain a comma of its own
+    assert all("," not in c for c in verdict.checks)
 
 
 def test_a_verifier_that_errors_drops_the_citation_rather_than_trusting_it(settings):
@@ -377,6 +395,7 @@ def test_a_verifier_that_errors_drops_the_citation_rather_than_trusting_it(setti
     # the model already answered, so the deterministic path may not rescue it
     assert verdict.answered is False
     assert verdict.abstained_because == gate.UNVERIFIED_CITATION
+    assert f"{gate.CHECK_SUPPORTED}:dropped:{GYM}:not verified" in verdict.checks
 
 
 def test_verification_is_skipped_when_disabled(settings):
@@ -458,12 +477,77 @@ def test_the_top_fact_is_not_quoted_when_it_is_off_the_subject(settings):
         evidence(GYM, GYM_TEXT, score=0.82),
         evidence(MILK, "The user's dog is called Pip.", score=0.50),
         question="Who is the user's dentist?",
+        seeds={"entities": ["user"], "terms": ["dentist"]},
     )
     verdict = build(warrant, None, settings).ask("Who is the user's dentist?", record=False)
 
     assert verdict.answered is False
     assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
     assert gate.CHECK_EXTRACTIVE in verdict.checks
+
+
+def test_a_question_memory_cannot_answer_is_never_quoted_at(settings):
+    """The regression that matters most here.
+
+    Live, with no provider, "What is Nora's blood type?" was answered with
+    "Nora's usual coffee order is a cortado" - top-ranked, comfortably clear of
+    second place, and completely unresponsive. A margin says the ordering is
+    confident; it cannot say the winner is on the subject.
+    """
+    question = "What is Nora's blood type?"
+    warrant = warrant_of(
+        evidence(GYM, "Nora's usual coffee order is a cortado.", score=0.86,
+                 path=["Entity:nora", "MENTIONS", "Fact:nora|usual_order|cortado"]),
+        evidence(MILK, "Nora lives in Campo de Ourique.", score=0.61,
+                 path=["Entity:nora", "MENTIONS", "Fact:nora|lives_in|campo de ourique"]),
+        question=question,
+        seeds={"entities": ["nora", "nora salgado"], "terms": ["nora", "blood type"]},
+    )
+    verdict = build(warrant, None, settings).ask(question, record=False)
+
+    assert verdict.answered is False
+    assert verdict.citations == []
+    assert "cortado" not in verdict.answer
+    assert verdict.abstained_because == gate.MODEL_UNAVAILABLE
+    assert gate.CHECK_EXTRACTIVE in verdict.checks
+
+
+def test_partial_coverage_below_the_threshold_is_not_enough(settings):
+    """"Which airline did Nora fly to Berlin with" covers only `berlin`."""
+    question = "Which airline did Nora fly to Berlin with?"
+    warrant = warrant_of(
+        evidence(GYM, "Nora travelled to Berlin in April.", score=0.86,
+                 path=["Entity:nora", "MENTIONS", "Fact:nora|travelled_to|berlin"]),
+        evidence(MILK, "Nora lives in Campo de Ourique.", score=0.55),
+        question=question,
+        seeds={"entities": ["nora"], "terms": []},
+    )
+    assert build(warrant, None, settings).ask(question, record=False).answered is False
+
+
+def test_a_question_naming_only_the_subject_is_never_quoted_at(settings):
+    question = "Who is Nora?"
+    warrant = warrant_of(
+        evidence(GYM, "Nora's usual coffee order is a cortado.", score=0.90),
+        question=question,
+        seeds={"entities": ["nora"], "terms": ["nora"]},
+    )
+    assert build(warrant, None, settings).ask(question, record=False).answered is False
+
+
+def test_the_predicate_in_the_chain_counts_towards_coverage(settings):
+    """`usual_order` lives in the fact key, not in the sentence."""
+    question = "What is Nora's usual order?"
+    warrant = warrant_of(
+        evidence(GYM, "Nora drinks a cortado every morning.", score=0.86,
+                 path=["Entity:nora", "MENTIONS", "Fact:nora|usual_order|cortado"]),
+        evidence(MILK, "Nora lives in Campo de Ourique.", score=0.55),
+        question=question,
+        seeds={"entities": ["nora"], "terms": []},
+    )
+    verdict = build(warrant, None, settings).ask(question, record=False)
+    assert verdict.answered is True
+    assert verdict.answer == "Nora drinks a cortado every morning."
 
 
 def test_a_question_of_only_stopwords_is_never_quoted(settings):

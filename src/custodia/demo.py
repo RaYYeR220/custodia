@@ -70,6 +70,20 @@ def to_turns(session: dict[str, Any], corpus: str, sidx: int) -> list[Turn]:
     return turns
 
 
+def extractor(principal: str) -> Any:
+    """The extractor the demo and the attack console both use.
+
+    Bound to the principal so first-person claims land on one subject key, and to
+    a live model when one is configured. With no credentials it falls back to the
+    rule-based extractor, which is weaker but keeps the whole path runnable.
+    """
+    from custodia.extract import extract_session
+    from custodia.llm import LLM
+
+    llm = LLM()
+    return lambda turns: extract_session(turns, llm=llm if llm.enabled else None, principal=principal)
+
+
 def seed_demo(client: HydraClient, *, force: bool = False, corpus: str | None = None) -> dict[str, Any]:
     """Ingest the demo corpus. Idempotent - re-seeding rewrites the same vertices."""
     from custodia.ingest import Ingestor
@@ -82,11 +96,23 @@ def seed_demo(client: HydraClient, *, force: bool = False, corpus: str | None = 
     if existing and not force:
         return {"corpus": name, "seeded": False, "facts": existing, "reason": "already seeded"}
 
-    ingestor = Ingestor(client, name, policy=Policy())
+    ingestor = Ingestor(client, name, policy=Policy(), extract=extractor(data.get("principal", "user")))
     for sidx, session in enumerate(data["sessions"]):
         turns = to_turns(session, name, sidx)
         ingestor.stage_session(session["sid"], ts=_iso(session["date"]), idx=sidx, turns=turns)
     report = ingestor.flush()
+
+    principal = data.get("principal", "")
+    if principal:
+        # whose memory this is, so anything that re-extracts later (the attack
+        # console) resolves first-person claims onto the same subject key
+        from custodia.ids import corpus_id
+
+        client.run(
+            "MATCH (c:Corpus {id: $cid}) SET c.principal = $principal",
+            cid=corpus_id(name),
+            principal=principal,
+        )
 
     result = report.as_dict()
     result["corpus"] = name

@@ -411,6 +411,7 @@ class RejectionRecord:
     turn_id: int                  # vertex id of the turn the write came from
     target_fact_id: int | None    # vertex id of the fact it blocked, if one was written
     ts: int
+    sid: str = ""                 # session the refused write arrived in
 
     @property
     def props(self) -> dict[str, Any]:
@@ -420,6 +421,7 @@ class RejectionRecord:
             "text": self.text,
             "tier": self.tier,
             "ts": self.ts,
+            "sid": self.sid,
         }
 
 
@@ -539,6 +541,7 @@ class Policy:
             turn_id=turn_id,
             target_fact_id=target_fact_id,
             ts=ts or fact.ingested_at or fact.valid_from,
+            sid=fact.sid,
         )
 
     def _identity_forgery(self, fact: Fact) -> tuple[str, str] | None:

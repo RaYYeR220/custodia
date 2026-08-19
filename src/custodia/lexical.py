@@ -54,7 +54,13 @@ STOPWORDS = frozenset(
     until up us very was we were what when where which while who whom why will
     with would you your yours
     """.split()
-)
+) | {
+    # the orphans an apostrophe leaves behind: "Nora's" -> nora, s and "don't"
+    # -> don, t. They carry no meaning, they appear in a third of all English
+    # text, and left in they let a fact match a question purely on possession
+    "s",
+    "t",
+}
 
 
 def words(text: str) -> list[str]:

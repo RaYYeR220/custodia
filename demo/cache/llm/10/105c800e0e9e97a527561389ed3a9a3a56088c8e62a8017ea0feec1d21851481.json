@@ -1,0 +1,1 @@
+{"text": "```json\n{\"supports\": false, \"reason\": \"mentions peanuts instead of shellfish or sesame\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 338, "completion_tokens": 112, "written_at": 1787125946}

@@ -237,37 +237,54 @@ class Ingestor:
         cid = ids.corpus_id(self.corpus)
         queries_before = int(self.client.stats["queries"])
 
-        # ---- vertices, in dependency order -------------------------------
-        self.client.upsert_nodes(
-            schema.CORPUS, [{"id": cid, "corpus": self.corpus, "name": self.corpus}]
-        )
-        self.client.upsert_nodes(schema.SESSION, self._session_rows())
-        self.client.upsert_nodes(schema.TURN, self._turn_rows())
+        # ---- vertices, every label before any edge -------------------------
+        #
+        # An edge batch whose endpoint is missing fails the whole statement --
+        # HydraDB matches both ends and will not skip a row -- so every vertex
+        # this flush can reference has to be committed first. `written` is the
+        # set that makes that unreachable rather than merely intended.
+        written: set[int] = set()
+
+        def _upsert(label: str, rows: Sequence[dict[str, Any]]) -> None:
+            if rows:
+                self.client.upsert_nodes(label, rows)
+                written.update(int(row["id"]) for row in rows)
+
+        _upsert(schema.CORPUS, [{"id": cid, "corpus": self.corpus, "name": self.corpus}])
+        _upsert(schema.SESSION, self._session_rows())
+        _upsert(schema.TURN, self._turn_rows())
+        origins = self._origins()
+        _upsert(schema.SOURCE, self._source_rows(origins))
         entity_rows = self._entity_rows()
-        if entity_rows:
-            self.client.upsert_nodes(schema.ENTITY, entity_rows)
+        _upsert(schema.ENTITY, entity_rows)
         fact_rows = self._fact_rows(facts)
-        if fact_rows:
-            self.client.upsert_nodes(schema.FACT, fact_rows)
+        _upsert(schema.FACT, fact_rows)
         rejection_rows, rejection_edges = self._rejection_rows(rejections)
-        if rejection_rows:
-            self.client.upsert_nodes(schema.REJECTION, rejection_rows)
+        _upsert(schema.REJECTION, rejection_rows)
 
         # ---- edges --------------------------------------------------------
+        def _link(rel: str, src: str, dst: str, pairs: Iterable[tuple[int, int]]) -> int:
+            return self._edges(rel, src, dst, pairs, known=written)
+
         edges = 0
-        edges += self._edges(schema.IN_CORPUS, schema.SESSION, schema.CORPUS, [
+        edges += _link(schema.IN_CORPUS, schema.SESSION, schema.CORPUS, [
             (ids.session_id(self.corpus, sid), cid) for sid in sorted(self._sessions)
         ])
-        edges += self._edges(schema.IN_SESSION, schema.TURN, schema.SESSION, [
+        edges += _link(schema.IN_SESSION, schema.TURN, schema.SESSION, [
             (ids.turn_id(self.corpus, sid, idx), ids.session_id(self.corpus, sid))
             for (sid, idx) in sorted(self._turns)
         ])
-        edges += self._edges(schema.DERIVED_FROM, schema.FACT, schema.TURN, [
+        edges += _link(schema.FROM_SOURCE, schema.TURN, schema.SOURCE, [
+            (ids.turn_id(self.corpus, sid, idx), ids.source_id(self.corpus, origin))
+            for origin, carried in sorted(origins.items())
+            for (sid, idx) in sorted(carried)
+        ])
+        edges += _link(schema.DERIVED_FROM, schema.FACT, schema.TURN, [
             (ids.fact_id(self.corpus, key), ids.turn_id(self.corpus, sid, idx))
             for key in sorted(provenance)
             for (sid, idx) in sorted(set(provenance[key]))
         ])
-        edges += self._edges(schema.MENTIONS, schema.FACT, schema.ENTITY, [
+        edges += _link(schema.MENTIONS, schema.FACT, schema.ENTITY, [
             (ids.fact_id(self.corpus, fact.key), ids.entity_id(self.corpus, norm))
             for fact in sorted(facts, key=lambda f: f.key)
             for norm in fact.entities
@@ -277,14 +294,12 @@ class Ingestor:
             (schema.CONTRADICTS, recon.contradicts),
             (schema.CORROBORATES, recon.corroborates),
         ):
-            edges += self._edges(rel, schema.FACT, schema.FACT, [
+            edges += _link(rel, schema.FACT, schema.FACT, [
                 (ids.fact_id(self.corpus, new.key), ids.fact_id(self.corpus, old.key))
                 for new, old in pairs
             ])
-        edges += self._edges(
-            schema.BLOCKED, schema.REJECTION, schema.FACT, rejection_edges["blocked"]
-        )
-        edges += self._edges(
+        edges += _link(schema.BLOCKED, schema.REJECTION, schema.FACT, rejection_edges["blocked"])
+        edges += _link(
             schema.RAISED_BY, schema.REJECTION, schema.TURN, rejection_edges["raised_by"]
         )
 
@@ -543,6 +558,7 @@ class Ingestor:
                         turn_id=turn_id,
                         target_fact_id=target,
                         ts=int(turn.ts),
+                        sid=turn.sid,
                     )
                 )
         return records
@@ -570,6 +586,35 @@ class Ingestor:
             {"id": ids.turn_id(self.corpus, sid, idx), **self._turns[(sid, idx)].props}
             for (sid, idx) in sorted(self._turns)
         ]
+
+    def _origins(self) -> dict[str, list[tuple[str, int]]]:
+        """Non-conversational origins, and which turns carried them.
+
+        A document read three times is one origin, not three. Giving it a vertex
+        is what lets the audit answer "what did this document try to put in
+        memory", which is a different question from "what does this turn say".
+        """
+        grouped: dict[str, list[tuple[str, int]]] = {}
+        for (sid, idx), turn in self._turns.items():
+            if turn.origin:
+                grouped.setdefault(turn.origin, []).append((sid, idx))
+        return grouped
+
+    def _source_rows(self, origins: dict[str, list[tuple[str, int]]]) -> list[dict[str, Any]]:
+        rows = []
+        for origin, carried in sorted(origins.items()):
+            tier = min(self._turns[key].tier for key in carried)
+            rows.append(
+                {
+                    "id": ids.source_id(self.corpus, origin),
+                    "corpus": self.corpus,
+                    "origin": origin,
+                    "tier": tier.label,
+                    "rank": int(tier),
+                    "turns": len(carried),
+                }
+            )
+        return rows
 
     def _entity_rows(self) -> list[dict[str, Any]]:
         return [
@@ -615,6 +660,8 @@ class Ingestor:
         src_label: str,
         dst_label: str,
         pairs: Iterable[tuple[int, int]],
+        *,
+        known: set[int] | None = None,
     ) -> int:
         rows: dict[int, dict[str, Any]] = {}
         for src, dst in pairs:
@@ -622,6 +669,12 @@ class Ingestor:
                 # a claim cannot be its own evidence; identical triples are one
                 # vertex by construction, so this only guards against a self-loop
                 continue
+            if known is not None and not {src, dst} <= known:
+                # the server fails the whole batch on a missing endpoint, so
+                # catch it here where the message can name the relationship
+                raise ValueError(
+                    f"{rel} edge {src}->{dst} references a vertex this flush did not write"
+                )
             rid = ids.edge_id(rel, src, dst)
             rows[rid] = {"s": src, "d": dst, "rid": rid}
         if not rows:

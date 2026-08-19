@@ -1,0 +1,1 @@
+{"text": "```json\n{\"answer\": \"The warrant does not contain information about which airline Nora flew to Berlin with.\", \"citations\": [], \"sufficient\": false}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 2630, "completion_tokens": 266, "written_at": 1787126014}

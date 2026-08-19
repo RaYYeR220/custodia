@@ -1,0 +1,1 @@
+{"text": "```json\n{\n  \"answer\": \"The warrant does not state when Nora's sesame allergy started.\",\n  \"citations\": [],\n  \"sufficient\": false\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 2546, "completion_tokens": 1269, "written_at": 1787125548}
