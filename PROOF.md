@@ -95,40 +95,49 @@ Reads, on the demo corpus:
 Limits found by probing, all in `docs/hydradb.md`: 1024 rows per batch, ~32 KB
 per string property, integer vertex ids only, scalar property values only.
 
-## 4. Durability
+## 4. Durability, and where it stops
 
-```bash
-docker kill custodia-hydradb          # not a graceful shutdown
-docker compose up -d hydradb
-docker compose exec api custodia ask "Is Nora allergic to anything?"
-docker compose exec api custodia audit
-```
-
-Run on the compose stack above, with the model switched off so nothing could be
-re-derived from a provider:
+HydraDB commits each statement to object storage as it returns, so committed data
+survives an unclean kill. We tested it with the model switched off, so nothing
+could be re-derived from a provider:
 
 ```
-before the kill   Yes, Nora is allergic to shellfish and sesame.
-                  citing 432720033355667563 (2026-07-09-allergy-update)
-                         1036381142946795615 (2026-01-14-intro)
+before                Yes, Nora is allergic to shellfish and sesame.
+                      citing 432720033355667563 (2026-07-09-allergy-update)
+                             1036381142946795615 (2026-01-14-intro)
 
 docker kill custodia-hydradb        # SIGKILL, no graceful shutdown
 docker compose up -d hydradb
 
-after the restart Yes, Nora is allergic to shellfish and sesame.
-                  citing the same two fact ids, from the same two sessions
-
-custodia audit    facts 29 · quarantined 1 · orphan_facts 0 ·
-                  dangling_supersedes 0 · quarantined_warrantable 0 · integrity ok
+after                 Yes, Nora is allergic to shellfish and sesame.
+                      citing the same two fact ids, from the same two sessions
+custodia audit        facts 29 · orphan_facts 0 · dangling_supersedes 0 · integrity ok
 ```
 
-Nothing was replayed or rebuilt: HydraDB commits each statement to object storage
-as it returns, and the deterministic vertex ids mean the answer cites the same
-rows it cited before. The first query after the restart logs
-`audit write-back failed: No write service available` — the graph was still
-coming up when the answer was written back. That is the designed behaviour rather
-than a defect: an audit failure is logged and the answer stands, because the one
-thing a failure here must never do is change what the gate decided.
+Nothing was replayed or rebuilt: the deterministic vertex ids mean the answer
+cites the same rows it cited before, and the provenance invariant still holds.
+
+**But the engine did not come back fully.** Reads worked; every write after the
+kill failed with `internal query execution error`, and the graph log shows why:
+
+```
+Bolt suppressed internal graph error                       (x10)
+error collecting garbage [resource=Manifest,
+                          error=ObjectStoreError(NotImplemented { operation: … })]
+```
+
+The local object-store backend does not implement an operation the engine needs
+to recover its manifest after an abrupt exit, so the write path stays wedged.
+`docker compose restart hydradb` does not clear it; `docker compose down -v`
+followed by a re-seed does, because that discards the store. We did not test the
+same sequence against a real S3-compatible backend, which is the configuration
+the engine is built for, so we make no claim either way about that.
+
+So the honest statement is narrower than "it survives a crash": **committed data
+survives an unclean kill and reads correctly; on the local backend the node does
+not return to a writable state.** That is a property of the deployment we shipped
+for reviewers — a single node on a local store — and it is the reason
+[JUDGES.md](JUDGES.md) does not ask anyone to kill the database.
 
 ## 5. The trust boundary
 

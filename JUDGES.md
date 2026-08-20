@@ -86,18 +86,18 @@ The last line reports how many quarantined facts retrieval passed over.
 | Provenance is written with the fact | `src/custodia/ingest.py` — `stage_facts` refuses a fact with no turn |
 | Batched, idempotent, crash-safe writes | `src/custodia/hydra/client.py`, `src/custodia/ids.py` |
 
-## 4. Durability, not asserted
+## 4. Durability
 
-HydraDB commits each write to object storage. Kill it uncleanly and ask again:
+Every write commits to object storage as the statement returns, so committed
+memory survives an unclean exit — `docker kill` the graph, bring it back, and the
+same question returns the same answer citing the same fact ids.
 
-```bash
-docker kill custodia-hydradb
-docker compose up -d hydradb
-docker compose exec api custodia ask "Is Nora allergic to anything?"
-docker compose exec api custodia audit
-```
-
-The memory is intact and the provenance check still passes.
+We are not putting that command in this list, because on the local object store
+the node comes back readable but **not writable**: its manifest recovery hits an
+operation the local backend does not implement, and only `docker compose down -v`
+clears it. The measurement, the log lines and the limits of the claim are in
+[PROOF.md](PROOF.md#4-durability-and-where-it-stops). If you want to try it, take
+a copy of the volume first.
 
 ## 5. The numbers
 

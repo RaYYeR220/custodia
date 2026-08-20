@@ -147,6 +147,23 @@ The memory is intact, and the answer still cites the January session it came
 from. `custodia audit` re-checks the provenance invariant against the recovered
 graph.
 
+**One caveat we found by doing it.** On the *local* object store the node comes
+back readable but not writable. Reads answer normally; every write returns
+`internal query execution error`, and the node log gives the reason:
+
+```
+Bolt suppressed internal graph error
+error collecting garbage [resource=Manifest,
+                          error=ObjectStoreError(NotImplemented { operation: … })]
+```
+
+Manifest recovery after an abrupt exit needs an object-store operation the local
+backend does not implement. `docker compose restart` does not clear it — only
+discarding the store does. We have not run the same sequence against an
+S3-compatible backend, which is what the engine is designed for, so this is a
+finding about the local development configuration and nothing more. It is worth
+knowing before you reach for `docker kill` on a store you care about.
+
 ## One integration note worth writing down
 
 The Bolt driver treats `neo4j://` and `bolt://` differently, and with HydraDB the

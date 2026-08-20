@@ -35,7 +35,7 @@ difference without having to read the code first.
 |---|---|---|
 | Batched writes are ~460× single-statement writes | **measured** | 11 rows/s versus 5 100 rows/s on an idle instance; method and caveats in `docs/hydradb.md` |
 | An idempotent re-ingest costs no more than the original | **measured** | replaying an identical 2 000-edge batch: 4 900 edges/s against 3 600/s for the first write |
-| Memory survives an unclean kill of the database | **demonstrated** | `docker kill custodia-hydradb`, restart, ask again — the answer and its citations are unchanged |
+| Committed data survives an unclean kill and reads correctly | **measured** | `docker kill`, restart, same answer citing the same fact ids, `custodia audit` still ok. **The node does not return to a writable state on the local object store** — stated in full in PROOF.md §4 |
 | Retrieval is HydraDB's own path search rather than a client-side join | **reasoned** + **demonstrated** | `HydraClient.paths()` issues `algo.MSpaths`; the returned `Path` objects are parsed, not reconstructed |
 | A property over ~32 KB fails the whole statement | **measured** | 32 000 characters stored, 40 000 refused; the client clips and warns |
 
