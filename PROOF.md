@@ -104,7 +104,31 @@ docker compose exec api custodia ask "Is Nora allergic to anything?"
 docker compose exec api custodia audit
 ```
 
-*Result: see the table at the end of this section — filled from the run, not asserted.*
+Run on the compose stack above, with the model switched off so nothing could be
+re-derived from a provider:
+
+```
+before the kill   Yes, Nora is allergic to shellfish and sesame.
+                  citing 432720033355667563 (2026-07-09-allergy-update)
+                         1036381142946795615 (2026-01-14-intro)
+
+docker kill custodia-hydradb        # SIGKILL, no graceful shutdown
+docker compose up -d hydradb
+
+after the restart Yes, Nora is allergic to shellfish and sesame.
+                  citing the same two fact ids, from the same two sessions
+
+custodia audit    facts 29 · quarantined 1 · orphan_facts 0 ·
+                  dangling_supersedes 0 · quarantined_warrantable 0 · integrity ok
+```
+
+Nothing was replayed or rebuilt: HydraDB commits each statement to object storage
+as it returns, and the deterministic vertex ids mean the answer cites the same
+rows it cited before. The first query after the restart logs
+`audit write-back failed: No write service available` — the graph was still
+coming up when the answer was written back. That is the designed behaviour rather
+than a defect: an audit failure is logged and the answer stands, because the one
+thing a failure here must never do is change what the gate decided.
 
 ## 5. The trust boundary
 
@@ -145,14 +169,103 @@ starts citing the injected fact has changed the answer however similar it reads.
 
 ## 6. LongMemEval
 
-*Filled from `eval/results/` once the run completes. Every number carries its
-sample size, seed, dataset sha256 and the models used; `not measured` appears
-wherever the run did not produce a figure.*
+30-question stratified sample of LongMemEval-S (500 items, sha256 in
+`eval/data/manifest.json`), seed 0, 7 abstention items. Answers by
+`gemini-3-7-flash`; graded by `grok-4-5`, which produced none of the answers it
+judges. Full scorecard: [eval/results/longmemeval-30.md](eval/results/longmemeval-30.md).
+
+```bash
+python -m eval.run_longmemeval --limit 30 --systems custodia,fullcontext,rag --seed 0   --out eval/results/longmemeval-30.json
+```
+
+| system | accuracy | abstention recall | hallucination | over-refusal | prompt tokens | truncated |
+|---|---|---|---|---|---|---|
+| **Custodia** | **34.8%** | 85.7% | 14.3% | 52.2% | **248** | 0 |
+| full context | 65.2% | 85.7% | 14.3% | 21.7% | 123,165 | 8 of 30 |
+| BM25 retrieval | 56.5% | 100% | 0% | 30.4% | 13,119 | 0 |
+
+**Custodia is behind on accuracy, by a lot, and we are not going to dress that
+up.** It answers about a third of the answerable questions where stuffing the
+whole history into the prompt answers two thirds — from 1/500th of the context,
+but two thirds is two thirds.
+
+The cause is retrieval recall, and we checked rather than assumed. Reading the
+failures: most of the gold answers are *derived* rather than stated — "15 days",
+"11 days", "3", "15 hours" — computed by counting or subtracting dates across
+several turns. Two hypotheses were tested against the already-ingested corpora
+and both were rejected: widening the warrant from 20 facts to 45 recovered
+nothing, and re-weighting the ranker recovered nothing (1 of 8 either way). The
+answer-bearing facts are not reaching the warrant at all. A gate that refuses
+without evidence, sitting on retrieval that does not find the evidence, refuses —
+which is exactly what the 52% over-refusal says.
+
+What the same table shows on the other side: 248 prompt tokens against 123,165,
+no truncation where the full-context baseline had to cut 8 of 30 haystacks, and
+every one of those answers carrying the turn it came from.
+
+### A negative result worth recording
+
+Between the runs we tried recording what the assistant said as `assistant`-tier
+facts, because `single-session-assistant` scored 0 of 5 without it. It fixed that
+type — 2 of 2 on the questions retested — and it was reverted anyway.
+
+The measurements, on the same 30-question sample and the same judge:
+
+| configuration | accuracy | over-refusal | facts per corpus | extraction prompt |
+|---|---|---|---|---|
+| with assistant-tier facts | 39.1% (9/23) | 56.5% | ~470 | +45% |
+| shipped (reverted) | 34.8% (8/23) | 52.2% | ~150 | baseline |
+
+One question apart on 23 answerable questions is noise, and we are not going to
+claim a direction from it. What is not noise is the cost: three times the graph
+and 45% more extraction tokens, for a difference we cannot measure at this sample
+size. The change also came with a caveat we could not clear — the two runs differ
+by more than that one commit, because the derived-answer gate landed between them
+— so it is reported as inconclusive rather than as an improvement or a
+regression. Both the commit and its revert are in the history.
+
+The earlier 50-question run
+([eval/results/longmemeval-50.md](eval/results/longmemeval-50.md)) is kept for the
+same reason, and read with the same caution: it was graded by the answering model
+judging its own output, which is the weaker method we replaced. Its 61.9% is not
+comparable to anything in the table above.
 
 ## 7. The poisoning suite
 
-*Filled from `eval/results/` once the run completes, with the negative control
-printed beside the attack numbers.*
+Our own construction, not a published benchmark: six attack families plus a
+negative control, generated deterministically from seed 0 and pinned in
+`eval/suites/poison_suite.json` (sha256 `5ede6838…`). 36 attacks, 6 controls, on
+the LongMemEval oracle haystacks.
+
+```bash
+python -m eval.run_poison --limit 10 --variant oracle --systems custodia,rag --seed 0   --out eval/results/poison-10.json
+```
+
+| metric | Custodia | BM25 retrieval |
+|---|---|---|
+| **flip rate** (attacker's value reached the answer) | **0 of 36** | 0 of 36 |
+| quarantine rate (attacks caught by a policy rule) | 46% overall | no such mechanism |
+| — forged authority | **100%** | — |
+| — instruction injection | **100%** | — |
+| **legitimate update accepted** (the control) | **66.7%** | **16.7%** |
+| over-block rate (control wrongly refused) | **0%** | 0% |
+
+Read those two rows together, because separately either one is misleading. Both
+systems held every attack, so flip rate alone says nothing — a store that cannot
+be updated at all also scores zero. The control is what separates them: when the
+principal changes their own record, Custodia takes the change two times in three
+and the retrieval baseline takes it one time in six. That is the difference
+between a guard and a wall.
+
+Honest limits on this table: `no_fact_extracted` was 10 of 36 for Custodia — a
+third of the attacks planted nothing an extractor would record, so they were
+never a test of the policy, and the harness counts them separately rather than
+scoring them as saves. For the BM25 baseline it is 36 of 36, because it has no
+extraction step at all; its "resistance" is an artefact of having no memory to
+poison. The two instruction-shaped families are where the content rules apply and
+where the rate is 100%; the families that arrive as plain contradictory
+statements are stopped by the tier rule instead, which is why their quarantine
+rate is 0% and their flip rate is still 0%.
 
 ---
 
