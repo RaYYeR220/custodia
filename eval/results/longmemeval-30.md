@@ -6,8 +6,8 @@
 |---|---|
 | run | `longmemeval-30` |
 | kind | `longmemeval` |
-| started at | `2026-08-20T01:55:40Z` |
-| finished at | `2026-08-20T02:02:00Z` |
+| started at | `2026-08-20T15:11:21Z` |
+| finished at | `2026-08-20T15:22:51Z` |
 | dataset | `s` |
 | dataset variant | `s` |
 | dataset sha256 | `08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894` |
@@ -52,7 +52,7 @@
 
 | system | accuracy | abstention recall | abstention precision | hallucination rate | over-refusal | mean prompt tokens | mean latency (ms) |
 |---|---|---|---|---|---|---|---|
-| custodia | 34.8% | 85.7% | 33.3% | 14.3% | 52.2% | 247.7 | 10,919.4 |
+| custodia | 30.4% | 100.0% | 35.0% | 0.0% | 56.5% | 328.5 | 20,275.5 |
 | fullcontext | 65.2% | 85.7% | 54.5% | 14.3% | 21.7% | 123,165.4 | 5,837.0 |
 | rag | 56.5% | 100.0% | 50.0% | 0.0% | 30.4% | 13,118.9 | 4,040.4 |
 
@@ -62,9 +62,9 @@
 |---|---|
 | questions scored | 30 |
 | answerable questions | 23 |
-| accuracy (answerable only) | 34.8% |
-| mean latency | 10,919.4 ms |
-| mean prompt tokens (estimated) | 247.7 |
+| accuracy (answerable only) | 30.4% |
+| mean latency | 20,275.5 ms |
+| mean prompt tokens (estimated) | 328.5 |
 | truncated inputs | 0 |
 | errors | 0 |
 | judge failures | 0 |
@@ -78,17 +78,17 @@
 | single-session-assistant | 3 | 1 | 33.3% |
 | single-session-preference | 1 | 0 | 0.0% |
 | single-session-user | 3 | 2 | 66.7% |
-| temporal-reasoning | 6 | 1 | 16.7% |
+| temporal-reasoning | 6 | 0 | 0.0% |
 
 **Abstention**
 
 | metric | value | meaning |
 |---|---|---|
 | abstention items | 7 | questions whose answer is genuinely absent from memory |
-| abstention recall | 85.7% | of those, the share the system declined |
-| abstention precision | 33.3% | of everything it declined, the share that genuinely had no answer |
-| hallucination rate | 14.3% | of the unanswerable questions, the share answered anyway and graded wrong |
-| over-refusal rate | 52.2% | answerable questions the system declined (the cost of refusing) |
+| abstention recall | 100.0% | of those, the share the system declined |
+| abstention precision | 35.0% | of everything it declined, the share that genuinely had no answer |
+| hallucination rate | 0.0% | of the unanswerable questions, the share answered anyway and graded wrong |
+| over-refusal rate | 56.5% | answerable questions the system declined (the cost of refusing) |
 
 Graded by: `llm-judge` x30. Token counts use the chars/4 heuristic (no tokenizer dependency; comparable across systems, not exact).
 

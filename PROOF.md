@@ -189,28 +189,56 @@ python -m eval.run_longmemeval --limit 30 --systems custodia,fullcontext,rag --s
 
 | system | accuracy | abstention recall | hallucination | over-refusal | prompt tokens | truncated |
 |---|---|---|---|---|---|---|
-| **Custodia** | **34.8%** | 85.7% | 14.3% | 52.2% | **248** | 0 |
+| **Custodia** | **30.4%** | **100%** | **0%** | 56.5% | **329** | 0 |
 | full context | 65.2% | 85.7% | 14.3% | 21.7% | 123,165 | 8 of 30 |
 | BM25 retrieval | 56.5% | 100% | 0% | 30.4% | 13,119 | 0 |
 
 **Custodia is behind on accuracy, by a lot, and we are not going to dress that
-up.** It answers about a third of the answerable questions where stuffing the
-whole history into the prompt answers two thirds — from 1/500th of the context,
-but two thirds is two thirds.
+up.** It answers under a third of the answerable questions where stuffing the
+whole history into the prompt answers two thirds.
 
-The cause is retrieval recall, and we checked rather than assumed. Reading the
-failures: most of the gold answers are *derived* rather than stated — "15 days",
-"11 days", "3", "15 hours" — computed by counting or subtracting dates across
-several turns. Two hypotheses were tested against the already-ingested corpora
-and both were rejected: widening the warrant from 20 facts to 45 recovered
-nothing, and re-weighting the ranker recovered nothing (1 of 8 either way). The
-answer-bearing facts are not reaching the warrant at all. A gate that refuses
-without evidence, sitting on retrieval that does not find the evidence, refuses —
-which is exactly what the 52% over-refusal says.
+Where it is behind is specific, and the per-question-type breakdown says it
+plainly:
 
-What the same table shows on the other side: 248 prompt tokens against 123,165,
-no truncation where the full-context baseline had to cut 8 of 30 haystacks, and
-every one of those answers carrying the turn it came from.
+| question type | n | correct |
+|---|---|---|
+| knowledge-update | 4 | **3** (75%) |
+| single-session-user | 3 | **2** (67%) |
+| single-session-assistant | 3 | 1 |
+| multi-session | 6 | 1 |
+| **temporal-reasoning** | 6 | **0** |
+| single-session-preference | 1 | 0 |
+
+Custodia recalls **stated** facts well — a value that was revised, something the
+person said about themselves. It fails on **derived** ones: "how many days
+between", "how many times did I", "what was the total". Those are the whole of
+`temporal-reasoning` and most of `multi-session`, and they are 12 of the 23
+answerable questions in this sample. A gate whose rule is *a fact must state the
+answer* has no natural way to reach them, and the second answer kind we added for
+exactly this (see the gate's `grounded` mode) fires too rarely to close the gap.
+
+The other column is the one we would point at: **100% abstention recall and 0%
+hallucination**, against 85.7% and 14.3% for the full-context baseline, on 329
+prompt tokens against 123,165. It never answered a question memory could not
+support, and it never invented one — which is the property the track names, and
+the property the accuracy column does not measure.
+
+### What we tried, measured, and kept or threw away
+
+Three retrieval hypotheses were tested against already-ingested corpora rather
+than argued about:
+
+| change | what it did | kept? |
+|---|---|---|
+| warrant 20 → 45 facts | nothing (1 of 8 failures recovered either way) | no |
+| re-weighting the ranker | nothing (1 of 8 either way) | no |
+| index each fact with its **source turn**, expand the walk from strong index hits, and let that walk cross `IN_SESSION` | candidates reaching ranking went from 3 to 81 on a question whose answer was in the graph but unreachable; both answer-bearing facts entered the warrant | **yes** |
+
+The third is a real fix to a real defect — a question and the fact answering it
+often share no vocabulary, and the join that connects them runs through the turn
+and the session, which the walk could not previously cross. It moved accuracy by
+one question out of 23, which is noise, and moved abstention recall from 85.7% to
+100% and hallucination from 14.3% to 0%, which is not. It cost 81 prompt tokens.
 
 ### A negative result worth recording
 
@@ -223,7 +251,8 @@ The measurements, on the same 30-question sample and the same judge:
 | configuration | accuracy | over-refusal | facts per corpus | extraction prompt |
 |---|---|---|---|---|
 | with assistant-tier facts | 39.1% (9/23) | 56.5% | ~470 | +45% |
-| shipped (reverted) | 34.8% (8/23) | 52.2% | ~150 | baseline |
+| reverted | 34.8% (8/23) | 52.2% | ~150 | baseline |
+| shipped (reverted + the retrieval fix) | 30.4% (7/23) | 56.5% | ~150 | baseline |
 
 One question apart on 23 answerable questions is noise, and we are not going to
 claim a direction from it. What is not noise is the cost: three times the graph

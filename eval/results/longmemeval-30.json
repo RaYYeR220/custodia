@@ -2,8 +2,8 @@
   "provenance": {
     "kind": "longmemeval",
     "run": "longmemeval-30",
-    "started_at": "2026-08-20T01:55:40Z",
-    "finished_at": "2026-08-20T02:02:00Z",
+    "started_at": "2026-08-20T15:11:21Z",
+    "finished_at": "2026-08-20T15:22:51Z",
     "dataset": "s",
     "dataset_variant": "s",
     "dataset_sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
@@ -95,8 +95,8 @@
       "n": 30,
       "answerable": 23,
       "abstention_items": 7,
-      "correct": 8,
-      "accuracy": 0.3478,
+      "correct": 7,
+      "accuracy": 0.3043,
       "accuracy_by_type": {
         "knowledge-update": {
           "n": 4,
@@ -125,17 +125,17 @@
         },
         "temporal-reasoning": {
           "n": 6,
-          "correct": 1,
-          "accuracy": 0.1667
+          "correct": 0,
+          "accuracy": 0.0
         }
       },
-      "abstained_total": 18,
-      "abstention_recall": 0.8571,
-      "abstention_precision": 0.3333,
-      "hallucination_rate": 0.1429,
-      "over_refusal_rate": 0.5217,
-      "mean_latency_ms": 10919.4,
-      "mean_prompt_tokens": 247.7,
+      "abstained_total": 20,
+      "abstention_recall": 1.0,
+      "abstention_precision": 0.35,
+      "hallucination_rate": 0.0,
+      "over_refusal_rate": 0.5652,
+      "mean_latency_ms": 20275.5,
+      "mean_prompt_tokens": 328.5,
       "judge_methods": {
         "llm-judge": 30
       },

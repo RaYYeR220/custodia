@@ -154,19 +154,23 @@ See [.env.example](.env.example).
 produced none of the answers it judges. Commands and full scorecards in
 [eval/README.md](eval/README.md) and [PROOF.md](PROOF.md).
 
-| system | accuracy | over-refusal | prompt tokens |
-|---|---|---|---|
-| **Custodia** | **34.8%** | 52.2% | **248** |
-| full context | 65.2% | 21.7% | 123,165 (8 of 30 truncated) |
-| BM25 retrieval | 56.5% | 30.4% | 13,119 |
+| system | accuracy | abstention recall | hallucination | prompt tokens |
+|---|---|---|---|---|
+| **Custodia** | **30.4%** | **100%** | **0%** | **329** |
+| full context | 65.2% | 85.7% | 14.3% | 123,165 (8 of 30 truncated) |
+| BM25 retrieval | 56.5% | 100% | 0% | 13,119 |
 
-**Custodia is behind on accuracy and the gap is not small.** The cause is
-retrieval recall, not the gate, and we tested that rather than assuming it:
-widening the warrant and re-weighting the ranker each recovered nothing. Most of
-the failures are questions whose gold answer is *derived* — counting events,
-subtracting dates — and the facts they would be derived from are not reaching the
-warrant. A gate that refuses without evidence, on retrieval that misses the
-evidence, refuses.
+**Custodia is behind on accuracy and the gap is not small.** It is behind in one
+specific place: questions whose answer must be *derived* rather than recalled —
+"how many days between", "how many times did I". Those are all of
+`temporal-reasoning` (0 of 6) and most of `multi-session` (1 of 6). On questions
+whose answer some turn actually states, it holds up: `knowledge-update` 3 of 4,
+`single-session-user` 2 of 3.
+
+What the same run shows on the other side: it never answered a question memory
+could not support, and it never invented one — 100% abstention recall and zero
+hallucinations against 85.7% and 14.3% for a baseline reading 370× more of the
+conversation.
 
 On the poisoning suite the picture is the other way round:
 
