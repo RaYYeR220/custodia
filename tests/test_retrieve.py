@@ -152,7 +152,14 @@ def seed(client: HydraClient) -> None:
     client.upsert_nodes(
         schema.ENTITY,
         [
-            {"id": ids.entity_id(CORPUS, norm), "corpus": CORPUS, "norm": norm, "name": norm}
+            {
+                "id": ids.entity_id(CORPUS, norm),
+                "corpus": CORPUS,
+                "norm": norm,
+                # the path procedures seed on this, not on `norm`
+                "ckey": schema.corpus_key(CORPUS, norm),
+                "name": norm,
+            }
             for norm in norms
         ],
     )
@@ -229,7 +236,15 @@ def seed_neighbour(client: HydraClient) -> int:
     )
     client.upsert_nodes(
         schema.ENTITY,
-        [{"id": ids.entity_id(NEIGHBOUR, GYM), "corpus": NEIGHBOUR, "norm": GYM, "name": GYM}],
+        [
+            {
+                "id": ids.entity_id(NEIGHBOUR, GYM),
+                "corpus": NEIGHBOUR,
+                "norm": GYM,
+                "ckey": schema.corpus_key(NEIGHBOUR, GYM),
+                "name": GYM,
+            }
+        ],
     )
     client.upsert_nodes(
         schema.FACT,

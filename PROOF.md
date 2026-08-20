@@ -54,7 +54,7 @@ are the same text.
 python -m pytest -q
 ```
 
-**541 passed.** 13 test files. The suite covers, among others:
+**567 passed.** 13 test files. The suite covers, among others:
 
 | What | Where |
 |---|---|
