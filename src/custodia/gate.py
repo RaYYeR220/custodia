@@ -645,8 +645,14 @@ def render(warrant: Warrant) -> str:
     of the conversation around it being in the prompt.
     """
     lines = [f"QUESTION: {warrant.question}"]
+    # Without a reference date "how long ago" has no answer, and a model with no
+    # date to subtract from is right to refuse. Give it the one the asking
+    # happened at, or the historical vantage point when the question has one.
     if warrant.as_of is not None:
         lines.append(f"AS OF: {stamp(warrant.as_of)} (answer as the memory stood then)")
+        lines.append(f'TODAY: {stamp(warrant.as_of)} ("now" for this question)')
+    elif warrant.asked_at:
+        lines.append(f'TODAY: {stamp(warrant.asked_at)} ("now" for this question)')
     lines.append("")
     lines.append(f"WARRANT ({len(warrant.evidence)} facts):")
     for item in warrant.evidence:

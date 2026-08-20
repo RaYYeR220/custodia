@@ -224,7 +224,11 @@ class CustodiaSystem:
         retriever = Retriever(client, corpus, index=index, llm=llm)
         gate = Gate(retriever, llm=llm)
         started = time.perf_counter()
-        verdict = gate.ask(instance.question, as_of=None)
+        # The benchmark asks each question at a point on its own timeline, and
+        # the text baselines are already told that date ("Today is ..."). Custodia
+        # has to be told too, or every "how long ago" question is asked from the
+        # real wall clock, years after the conversation it is about.
+        verdict = gate.ask(instance.question, as_of=instance.asked_at or None)
         elapsed = (time.perf_counter() - started) * 1000
 
         text = str(getattr(verdict, "answer", "") or "")
