@@ -2,8 +2,8 @@
   "provenance": {
     "kind": "longmemeval",
     "run": "longmemeval-30",
-    "started_at": "2026-08-19T21:33:55Z",
-    "finished_at": "2026-08-20T00:45:32Z",
+    "started_at": "2026-08-20T01:00:16Z",
+    "finished_at": "2026-08-20T01:37:38Z",
     "dataset": "s",
     "dataset_variant": "s",
     "dataset_sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
@@ -95,13 +95,13 @@
       "n": 30,
       "answerable": 23,
       "abstention_items": 7,
-      "correct": 9,
-      "accuracy": 0.3913,
+      "correct": 8,
+      "accuracy": 0.3478,
       "accuracy_by_type": {
         "knowledge-update": {
           "n": 4,
-          "correct": 4,
-          "accuracy": 1.0
+          "correct": 3,
+          "accuracy": 0.75
         },
         "multi-session": {
           "n": 6,
@@ -110,8 +110,8 @@
         },
         "single-session-assistant": {
           "n": 3,
-          "correct": 3,
-          "accuracy": 1.0
+          "correct": 1,
+          "accuracy": 0.3333
         },
         "single-session-preference": {
           "n": 1,
@@ -120,13 +120,13 @@
         },
         "single-session-user": {
           "n": 3,
-          "correct": 1,
-          "accuracy": 0.3333
+          "correct": 2,
+          "accuracy": 0.6667
         },
         "temporal-reasoning": {
           "n": 6,
-          "correct": 0,
-          "accuracy": 0.0
+          "correct": 1,
+          "accuracy": 0.1667
         }
       },
       "abstained_total": 19,
@@ -134,8 +134,8 @@
       "abstention_precision": 0.3158,
       "hallucination_rate": 0.1429,
       "over_refusal_rate": 0.5652,
-      "mean_latency_ms": 17406.2,
-      "mean_prompt_tokens": 515.2,
+      "mean_latency_ms": 14350.6,
+      "mean_prompt_tokens": 247.7,
       "judge_methods": {
         "llm-judge": 30
       },
