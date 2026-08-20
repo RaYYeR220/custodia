@@ -6,6 +6,15 @@ question memory cannot support gets refused rather than invented.
 
 Built on [HydraDB](https://github.com/hydra-db/hydradb).
 
+**[Live demo](https://custodia.184-192-64-179.sslip.io)** ·
+**[Two-minute walkthrough](https://youtu.be/R-Q8ccfgV3M)**
+
+The demo is the real system: ask it something the history covers and the answer
+arrives with citations; ask it something the history does not, and it declines.
+To run the same thing yourself, with no API key at all, see [Try it](#try-it) -
+`docker compose up -d` then `docker compose exec api custodia verify` is the
+whole of it.
+
 ---
 
 ## Why
@@ -71,6 +80,10 @@ needs no API key: the response cache the walkthrough replays is committed.
 
 The web client is at <http://localhost:3000>, the API and its OpenAPI document at
 <http://localhost:8080/docs>.
+
+If you would rather not build anything, the same client is already running at
+<https://custodia.184-192-64-179.sslip.io>, and the
+[two-minute walkthrough](https://youtu.be/R-Q8ccfgV3M) shows what to look for.
 
 ### The three things worth watching
 
