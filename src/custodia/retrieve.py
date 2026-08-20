@@ -215,6 +215,11 @@ class Warrant:
     question: str
     asked_at: int
     as_of: int | None
+    #: True when the caller told us when the question was asked. When it is False
+    #: `asked_at` is just the wall clock at retrieval, which is not something we
+    #: should present to the model as "today" - and putting a moving timestamp in
+    #: the prompt would also make every answer uncacheable.
+    asked_at_known: bool = False
     evidence: list[Evidence] = field(default_factory=list)
     seeds: dict[str, list[str]] = field(default_factory=dict)
     paths_examined: int = 0
@@ -497,6 +502,7 @@ class Retriever:
         counted from; it filters nothing.
         """
         started = time.perf_counter()
+        asked_at_known = asked_at is not None
         asked_at = int(asked_at if asked_at is not None else time.time())
         size = k if k is not None else self.settings.warrant_size
 
@@ -519,6 +525,7 @@ class Retriever:
         return Warrant(
             question=question,
             asked_at=asked_at,
+            asked_at_known=asked_at_known,
             as_of=as_of,
             evidence=keep,
             seeds=seeds,

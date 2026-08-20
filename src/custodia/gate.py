@@ -676,7 +676,7 @@ def render(warrant: Warrant) -> str:
     if warrant.as_of is not None:
         lines.append(f"AS OF: {stamp(warrant.as_of)} (answer as the memory stood then)")
         lines.append(f'TODAY: {stamp(warrant.as_of)} ("now" for this question)')
-    elif warrant.asked_at:
+    elif warrant.asked_at_known:
         lines.append(f'TODAY: {stamp(warrant.asked_at)} ("now" for this question)')
     lines.append("")
     lines.append(f"WARRANT ({len(warrant.evidence)} facts):")

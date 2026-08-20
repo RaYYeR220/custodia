@@ -1,0 +1,1 @@
+{"text": "```json\n{\n  \"entities\": [\"nora\"],\n  \"predicates\": [\"works at\", \"does\"]\n}\n```", "model": "gemini-3-5-flash-lite", "prompt_tokens": 139, "completion_tokens": 30, "written_at": 1787251884}

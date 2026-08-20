@@ -1,0 +1,1 @@
+{"text": "```json\n{\n  \"answer\": \"Nora's blood type is not mentioned in the memory.\",\n  \"citations\": [],\n  \"sufficient\": false\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 3547, "completion_tokens": 201, "written_at": 1787251813}
