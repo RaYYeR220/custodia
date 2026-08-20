@@ -1,1 +1,1 @@
-{"text": "```json\n{\n  \"entities\": [\"nora\", \"coffee place\"],\n  \"predicates\": [\"orders\"]\n}\n```", "model": "gemini-3-5-flash-lite", "prompt_tokens": 137, "completion_tokens": 30, "written_at": 1787190770}
+{"text": "```json\n{\"entities\": [\"nora\", \"coffee place\"], \"predicates\": [\"orders\", \"likes\"]}\n```", "model": "gemini-3-5-flash-lite", "prompt_tokens": 137, "completion_tokens": 26, "written_at": 1787238252}

@@ -503,10 +503,16 @@ def test_k_bounds_the_warrant(retriever: Retriever):
 
 
 def test_a_fact_no_entity_tags_is_still_reachable_lexically(retriever: Retriever):
+    """The index is the way in for a fact no entity extractor tagged.
+
+    The walk still runs: a strong index hit is used as a graph anchor, because
+    the fact that answers a question is often the *sibling* of the fact that
+    matches its words. So this asserts the fact is reachable, not that nothing
+    was traversed.
+    """
     warrant = retriever.warrant("what is the squat rack access code")
 
     assert F_CODE in warrant.ids()
-    assert warrant.paths_examined == 0  # nothing entity-seeded; this is all BM25
 
 
 def test_without_an_index_that_fact_is_unreachable(client, settings):

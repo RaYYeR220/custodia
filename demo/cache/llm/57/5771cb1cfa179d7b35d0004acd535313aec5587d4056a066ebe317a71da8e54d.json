@@ -1,1 +1,0 @@
-{"text": "```json\n{\n  \"answer\": \"Nora's sesame allergy started as of July 9, 2026.\",\n  \"citations\": [432720033355667563],\n  \"sufficient\": true,\n  \"kind\": \"recall\"\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 3416, "completion_tokens": 601, "written_at": 1787190879}

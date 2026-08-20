@@ -1,0 +1,1 @@
+{"text": "```json\n{\"answer\": \"Nora lives in Campo de Ourique.\", \"citations\": [510749877553429516], \"sufficient\": true, \"kind\": \"recall\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 3380, "completion_tokens": 545, "written_at": 1787238340}

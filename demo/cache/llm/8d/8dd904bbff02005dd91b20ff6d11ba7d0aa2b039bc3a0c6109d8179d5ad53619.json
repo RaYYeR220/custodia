@@ -1,1 +1,1 @@
-{"text": "```json\n{\"supports\": true, \"reason\": \"The fact directly states Nora's neighborhood of residence.\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 355, "completion_tokens": 72, "written_at": 1787190894}
+{"text": "```json\n{\"supports\": true, \"reason\": \"exact match\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 355, "completion_tokens": 57, "written_at": 1787238342}

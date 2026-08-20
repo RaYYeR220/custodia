@@ -86,11 +86,12 @@ PHRASE_MAX = 3
 # voices restate each other constantly, and when they disagree the principal is
 # right by definition. A tier term that only nudges the ordering lets a stale
 # assistant restatement sit above the fact that replaced it.
-W_LEXICAL = 0.28
-W_ANCHOR = 0.12
-W_PROXIMITY = 0.12
-W_TIER = 0.28
-W_CORROBORATION = 0.08
+W_LEXICAL = 0.26
+W_ANCHOR = 0.10
+W_NEIGHBOUR = 0.14
+W_PROXIMITY = 0.10
+W_TIER = 0.22
+W_CORROBORATION = 0.06
 W_RECENCY = 0.12
 
 #: corroboration saturates: the fourth independent witness adds nothing
@@ -105,6 +106,25 @@ ANCHOR_INDIRECT = 0.5
 #: as one hop out rather than as zero: it has no chain, and it should not
 #: out-earn a fact whose chain the warrant can actually show.
 LEXICAL_HOPS = 1
+
+#: how many of the strongest BM25 hits are used as graph-expansion anchors, and
+#: how strong they have to be. Two is deliberate: the anchor's job is to reach the
+#: siblings of a fact the question actually matched, and a weak match is not a
+#: foothold, it is a guess with a traversal budget attached.
+LEXICAL_ANCHORS = 2
+LEXICAL_ANCHOR_FLOOR = 0.35
+
+#: fact -> turn -> session -> turn -> fact. Four hops, because the session is the
+#: unit of context a person reasons over: "where did I redeem the coupon" is
+#: answered by a turn two messages earlier in the same conversation, and nothing
+#: shorter reaches it. Entity seeding never gets there either, since the two
+#: claims name no entity in common.
+ANCHOR_MAX_LEN = 4
+
+#: the anchor walk needs IN_SESSION, which the entity walk deliberately omits:
+#: from an entity, session-mates are noise; from a fact the question matched,
+#: they are the surrounding conversation.
+ANCHOR_RELS = [*schema.RETRIEVAL_RELS, schema.IN_SESSION]
 
 #: facts below this tier never enter a warrant. External content is
 #: attacker-influenceable by definition; it may be recorded and it may be shown
@@ -256,6 +276,7 @@ def evidence_dict(item: Evidence) -> dict[str, Any]:
 
 ROUTE_ENTITY = "entity"
 ROUTE_LEXICAL = "lexical"
+ROUTE_NEIGHBOUR = "neighbour"
 
 
 @dataclass(slots=True)
@@ -272,6 +293,8 @@ class _Candidate:
     anchor: float = 0.0
     #: how well the index matched it against this question, 0..1
     lexical: float = 0.0
+    #: how strongly a *neighbouring* fact matched, when this one was reached from it
+    neighbour: float = 0.0
     routes: set[str] = field(default_factory=set)
 
     def by_graph(self, *, hops: int, path: list[str], anchor: float) -> None:
@@ -294,6 +317,17 @@ class _Candidate:
         if not self.path:
             self.path = ["lexical index"]
         self.routes.add(ROUTE_LEXICAL)
+
+    def by_neighbour(self, strength: float) -> None:
+        """Record arriving here from a fact the question matched strongly.
+
+        Kept apart from `anchor`, which measures closeness to an entity the
+        question named. This measures closeness to a *statement* the question
+        matched - the sibling claim lifted from the same turn, which is where the
+        answer lives when the question and the answer share no vocabulary.
+        """
+        self.neighbour = max(self.neighbour, strength)
+        self.routes.add(ROUTE_NEIGHBOUR)
 
     def absorb(self, other: "_Candidate") -> None:
         """Merge a candidate that resolved onto the same fact as this one."""
@@ -464,7 +498,8 @@ class Retriever:
         turns: dict[int, dict[str, Any]] = {}
 
         paths_examined = self._expand(seeds["entities"], candidates, turns)
-        self._lexical(question, candidates)
+        anchored = self._lexical(question, candidates)
+        paths_examined += self._expand_from_facts(anchored, candidates, turns)
         self._hydrate(candidates)
 
         facts_considered = len(candidates)
@@ -566,12 +601,61 @@ class Retriever:
             if turn.get("corpus") == self.corpus:
                 turns.setdefault(src, turn)
 
-    def _lexical(self, question: str, candidates: dict[int, _Candidate]) -> None:
-        """Fold in the BM25 hits, which cover claims no entity extractor tagged."""
+    def _lexical(self, question: str, candidates: dict[int, _Candidate]) -> list[int]:
+        """Fold in the BM25 hits, and report the strongest as expansion anchors."""
         if self.index is None or not len(self.index):
-            return
-        for fid, score in self.index.search(question, self.settings.seed_lexical):
+            return []
+        hits = self.index.search(question, self.settings.seed_lexical)
+        for fid, score in hits:
             candidates.setdefault(int(fid), _Candidate(fid=int(fid))).by_index(float(score))
+        return [
+            (int(fid), float(score))
+            for fid, score in hits[:LEXICAL_ANCHORS]
+            if score >= LEXICAL_ANCHOR_FLOOR
+        ]
+
+    def _expand_from_facts(
+        self,
+        anchors: Sequence[tuple[int, float]],
+        candidates: dict[int, _Candidate],
+        turns: dict[int, dict[str, Any]],
+    ) -> int:
+        """Walk out from the strongest lexical hits, not only from entity seeds.
+
+        A question and the fact that answers it often share no words. "Where did
+        I redeem the coffee creamer coupon" matches the fact recording the
+        redemption perfectly and the fact naming the shop not at all - they are
+        two claims lifted from one turn, and only the second holds the answer.
+        Seeding the walk from a lexical hit reaches its siblings through the turn
+        they were both derived from, which is the join the index cannot make and
+        the graph makes in one statement.
+
+        Entity seeding stays first: it is the broader net. This is the fallback
+        for the questions that net misses, and it is bounded to a couple of
+        anchors so a vague question cannot turn into a corpus scan.
+        """
+        walked = 0
+        for fid, strength in anchors:
+            try:
+                rows = self.client.paths(
+                    rel_types=ANCHOR_RELS,
+                    source_node=int(fid),
+                    max_len=ANCHOR_MAX_LEN,
+                    direction="both",
+                    count=self.settings.path_count,
+                )
+            except HydraError as exc:
+                log.info("expansion from fact %s failed: %s", fid, exc)
+                continue
+            before = set(candidates)
+            for row in rows:
+                self._absorb(row.get("path"), candidates, turns)
+            walked += len(rows)
+            # everything this walk brought in is a sibling of a fact the question
+            # matched, and carries the anchor's strength as its own evidence
+            for fid in set(candidates) - before | {int(fid)}:
+                candidates[fid].by_neighbour(strength)
+        return walked
 
     def _hydrate(self, candidates: dict[int, _Candidate]) -> None:
         """Fill in properties for candidates that arrived without them."""
@@ -765,6 +849,7 @@ class Retriever:
             score = (
                 W_LEXICAL * min(1.0, cand.lexical)
                 + W_ANCHOR * min(1.0, cand.anchor)
+                + W_NEIGHBOUR * min(1.0, cand.neighbour)
                 + W_PROXIMITY * proximity
                 + W_TIER * tier
                 + W_CORROBORATION * corr

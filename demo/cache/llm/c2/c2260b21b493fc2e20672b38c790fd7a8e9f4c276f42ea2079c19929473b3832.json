@@ -1,1 +1,0 @@
-{"text": "```json\n{\n  \"answer\": \"Nora's job title is design lead, and she works at Marloe.\",\n  \"citations\": [4578556435106773044, 2836006123838619767],\n  \"sufficient\": true,\n  \"kind\": \"recall\"\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 3428, "completion_tokens": 1058, "written_at": 1787190762}

@@ -142,7 +142,20 @@ class LexicalIndex:
 
     @classmethod
     def build(cls, client: HydraClient, corpus: str) -> "LexicalIndex":
-        """Read every fact in the corpus and index its text and triple parts.
+        """Index every fact by its own words *and* the words of the turn it came from.
+
+        Indexing the fact alone loses questions to paraphrase. A turn saying "I
+        get my coffee creamer at Target, I use their coupon app" becomes the fact
+        "the user uses the Cartwheel app from Target" - and a question asking
+        where the coupon is used then shares no vocabulary with anything in the
+        index, so the fact is never a candidate and the answer is refused with the
+        evidence sitting in the graph. Measured on a LongMemEval haystack: 3 of
+        138 facts reached ranking, and the two that held the answer were not among
+        them. The source turn keeps the asker's own words attached to the fact
+        without the fact itself having to hoard them.
+
+        Provenance is unaffected: the turn text is retrieval signal only, and what
+        a warrant carries is still the fact and the chain that reached it.
 
         Quarantined facts are indexed too. They must stay *retrievable* so the
         retriever can drop them and report how many it dropped -- an attack that
@@ -151,21 +164,24 @@ class LexicalIndex:
         rows = client.run(
             # the equality goes in the pattern, not in a WHERE: HydraDB uses the
             # vertex index for the first and scans for the second
-            f"MATCH (f:{schema.FACT} {{corpus: $corpus}}) "
-            "RETURN f.id AS id, f.text AS text, f.subj AS subj, f.pred AS pred, f.obj AS obj",
+            f"MATCH (f:{schema.FACT} {{corpus: $corpus}})-[:{schema.DERIVED_FROM}]->(t:{schema.TURN}) "
+            "RETURN f.id AS id, f.text AS text, f.subj AS subj, f.pred AS pred, "
+            "f.obj AS obj, t.text AS turn",
             corpus=corpus,
         )
-        docs = [
-            (
-                int(row["id"]),
-                " ".join(
-                    str(row.get(part) or "") for part in ("text", "subj", "pred", "obj")
-                ),
-            )
-            for row in rows
-            if row.get("id") is not None
-        ]
-        return cls.from_documents(corpus, docs)
+        merged: dict[int, list[str]] = {}
+        for row in rows:
+            if row.get("id") is None:
+                continue
+            fid = int(row["id"])
+            words = merged.setdefault(fid, [])
+            if not words:
+                words.extend(str(row.get(part) or "") for part in ("text", "subj", "pred", "obj"))
+            # a fact asserted by two turns is indexed under both of their wordings
+            turn = str(row.get("turn") or "")
+            if turn and turn not in words:
+                words.append(turn)
+        return cls.from_documents(corpus, [(fid, " ".join(w)) for fid, w in merged.items()])
 
     @classmethod
     def from_documents(cls, corpus: str, docs: Iterable[tuple[int, str]]) -> "LexicalIndex":
