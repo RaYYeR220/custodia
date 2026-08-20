@@ -1,1 +1,0 @@
-{"text": "```json\n{\"supports\": true, \"reason\": \"matches coffee order\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 360, "completion_tokens": 86, "written_at": 1787174998}

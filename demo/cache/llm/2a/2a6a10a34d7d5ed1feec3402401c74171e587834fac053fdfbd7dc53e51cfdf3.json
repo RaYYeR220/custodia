@@ -1,0 +1,1 @@
+{"text": "```json\n{\"answer\": \"Nora's usual coffee order is a cortado.\", \"citations\": [1776262129876427300], \"sufficient\": true, \"kind\": \"recall\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 3286, "completion_tokens": 600, "written_at": 1787187441}
