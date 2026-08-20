@@ -1,0 +1,1 @@
+{"text": "```json\n{\n  \"answer\": \"Nora's usual order is a flat white, no sugar.\",\n  \"citations\": [4139692764028856052],\n  \"sufficient\": true,\n  \"kind\": \"recall\"\n}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 2152, "completion_tokens": 912, "written_at": 1787238532}

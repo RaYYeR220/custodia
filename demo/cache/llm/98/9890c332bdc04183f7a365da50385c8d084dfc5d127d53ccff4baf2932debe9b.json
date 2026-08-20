@@ -1,1 +1,1 @@
-{"text": "```json\n{\"supports\": true, \"reason\": \"Confirms Nora's severe shellfish allergy.\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 364, "completion_tokens": 82, "written_at": 1787238313}
+{"text": "```json\n{\"supports\": true, \"reason\": \"Confirms Nora's severe shellfish allergy\"}\n```", "model": "gemini-3-7-flash", "prompt_tokens": 364, "completion_tokens": 107, "written_at": 1787238596}
