@@ -228,7 +228,7 @@ class CustodiaSystem:
         # the text baselines are already told that date ("Today is ..."). Custodia
         # has to be told too, or every "how long ago" question is asked from the
         # real wall clock, years after the conversation it is about.
-        verdict = gate.ask(instance.question, as_of=instance.asked_at or None)
+        verdict = gate.ask(instance.question, asked_at=instance.asked_at or None)
         elapsed = (time.perf_counter() - started) * 1000
 
         text = str(getattr(verdict, "answer", "") or "")

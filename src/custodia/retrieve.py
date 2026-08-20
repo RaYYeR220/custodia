@@ -486,11 +486,18 @@ class Retriever:
         question: str,
         *,
         as_of: int | None = None,
+        asked_at: int | None = None,
         k: int | None = None,
     ) -> Warrant:
-        """Seed, expand, resolve in time, rank, and cut to a bounded set."""
+        """Seed, expand, resolve in time, rank, and cut to a bounded set.
+
+        ``as_of`` and ``asked_at`` are different things and only look alike.
+        ``as_of`` rewinds the memory - answer as it stood then. ``asked_at`` only
+        says when the asking happened, which is what "three months ago" is
+        counted from; it filters nothing.
+        """
         started = time.perf_counter()
-        asked_at = int(time.time())
+        asked_at = int(asked_at if asked_at is not None else time.time())
         size = k if k is not None else self.settings.warrant_size
 
         seeds = self.seeds(question)

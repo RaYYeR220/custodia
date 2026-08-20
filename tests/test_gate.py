@@ -54,7 +54,14 @@ class StubRetriever:
         self.settings = settings
         self.asked: list[tuple[str, int | None]] = []
 
-    def warrant(self, question: str, *, as_of: int | None = None, k: int | None = None):
+    def warrant(
+        self,
+        question: str,
+        *,
+        as_of: int | None = None,
+        asked_at: int | None = None,
+        k: int | None = None,
+    ):
         self.asked.append((question, as_of))
         return self._warrant
 

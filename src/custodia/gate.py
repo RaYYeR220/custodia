@@ -317,11 +317,12 @@ class Gate:
         question: str,
         *,
         as_of: int | None = None,
+        asked_at: int | None = None,
         record: bool = True,
     ) -> Verdict:
         """Retrieve, answer, and refuse unless every check passes."""
         started = time.perf_counter()
-        warrant = self.retriever.warrant(question, as_of=as_of)
+        warrant = self.retriever.warrant(question, as_of=as_of, asked_at=asked_at)
         verdict = self._decide(question, warrant)
         verdict.latency_ms = (time.perf_counter() - started) * 1000.0
         if record and self.auditor is not None:
