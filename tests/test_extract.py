@@ -420,40 +420,10 @@ def test_the_prompt_forbids_inventing_attributes():
 
 
 def test_the_prompt_separates_the_two_voices():
-    """Both voices are recorded; only one of them may describe the person."""
     system = _system_prompt()
 
     assert "Mine the user's turns exhaustively" in system
-    assert "Everything the assistant supplied as information" in system
-    assert "Write an assistant claim in the assistant's voice" in system
-    assert "The assistant is not a source of facts about the person" in system
-
-
-def test_the_prompt_asks_for_what_the_assistant_supplied():
-    """The material every "what did you say?" question is asked about."""
-    system = " ".join(_system_prompt().split())
-
-    for supplied in (
-        "a name it invented",
-        "a definition or an explanation it gave",
-        "a chapter, source or reference it cited",
-        "a figure it quoted",
-        "the options it named and what it said about each",
-        "a recommendation together with the reason behind it",
-        # the half of it a model drops first: generic knowledge and listicles
-        "even when it is general knowledge rather than anything about the person",
-        "even when it arrives as a numbered list - each item is a claim",
-    ):
-        assert supplied in system
-
-
-def test_the_prompt_keeps_the_assistant_off_the_principal():
-    """The defect this rule was written for: an assistant-invented attribute."""
-    system = _system_prompt()
-
-    assert "I didn't know you had a dog named Lola" in system
-    assert "the species in it is the assistant's own invention" in system
-    assert "no fact about Lola comes out of that turn" in system
+    assert "Never its recommendations" in system
 
 
 def test_worked_examples_travel_with_the_prompt():
@@ -462,31 +432,13 @@ def test_worked_examples_travel_with_the_prompt():
 
 
 def test_a_long_assistant_turn_is_clipped():
-    advice = "Here are some options. " + "A" * 4000
+    advice = "Here are some options. " + "A" * 3000
     rendered = prompts.render_turn(turn(1, advice, role="assistant"))
 
     assert "[... assistant message trimmed]" in rendered
     assert rendered.startswith("#1 [assistant]")
     assert "Here are some options." in rendered
     assert len(rendered) < len(advice)
-
-
-def test_the_clip_reaches_what_the_assistant_actually_answered():
-    """The clip is a tax on the tail, not on the substance.
-
-    Measured over LongMemEval-S: across the questions that ask what the
-    assistant said, the answer's span inside the turn holding it ends by
-    character 1,628 in every case. A clip landing before that cuts the answer
-    out of the prompt, and no rule about recording assistant claims can put back
-    what the model was never shown.
-    """
-    answer = "The designation on your jumpsuit was 'LIV'."
-    padded = "Here is the background you asked for. " + "Some context. " * 110 + answer
-    assert 1200 < padded.index(answer) < 1628
-
-    rendered = prompts.render_turn(turn(1, padded, role="assistant"))
-
-    assert answer in rendered
 
 
 @pytest.mark.parametrize(
@@ -597,134 +549,6 @@ def test_an_untrusted_turn_without_an_origin_still_names_its_channel():
     fact = extract_session(turns, llm=llm, principal="nora")[0]
 
     assert (fact.subject, fact.predicate) == ("tool", "asserts")
-
-
-# ---- the assistant's own voice -------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    "said,subject,predicate,obj",
-    [
-        # the four shapes a "what did you say?" question asks about: a pair of
-        # options the assistant listed, a reference it cited, a name it invented,
-        # and a detail it supplied inside a story it was telling
-        (
-            "Most companies pair the password with biometric authentication or a "
-            "one-time password (OTP).",
-            "two-factor authentication",
-            "second_factor",
-            "biometric authentication or a one-time password (otp)",
-        ),
-        (
-            "Tanqueray puts the prayer of beginners in Chapter 4 of Book 1, "
-            "'Vocal Prayer and Meditation'.",
-            "the spiritual life",
-            "chapter",
-            "chapter 4 of book 1, vocal prayer and meditation",
-        ),
-        (
-            "Let's call the radiation-amplified one the Fissionator.",
-            "radiation amplified zombie",
-            "called",
-            "fissionator",
-        ),
-        (
-            "The designation stencilled on your jumpsuit is 'LIV'.",
-            "jumpsuit",
-            "designation",
-            "liv",
-        ),
-    ],
-)
-def test_what_the_assistant_supplied_is_recorded_in_its_own_voice(said, subject, predicate, obj):
-    turns = [turn(0, "Remind me what that was?"), turn(1, said, role="assistant")]
-    llm = FakeLLM(
-        make_settings(),
-        lambda i, batch: {
-            "facts": [item(1, text=said, subject=subject, predicate=predicate, object=obj)]
-        },
-    )
-
-    fact = extract_session(turns, llm=llm)[0]
-
-    assert fact.turn_idx == 1
-    # the subject is the thing being described, never the person
-    assert fact.subject == subject
-    assert fact.predicate == predicate
-    assert fact.object == obj
-    assert fact.text.startswith("The assistant said:")
-    assert said in fact.text
-
-
-def test_an_assistant_claim_is_not_flattened_onto_asserts():
-    """Unlike quoted material, the assistant is a party to the conversation.
-
-    A document's claim collapses to `source | asserts | claim` because nothing in
-    it may be shelved as an attribute of anything. The assistant is inside the
-    conversation and its claims stay queryable as themselves; the tier, not the
-    shape, is what keeps them under the principal.
-    """
-    turns = [turn(0, "What's the second factor?"), turn(1, "Usually an OTP.", role="assistant")]
-    llm = FakeLLM(
-        make_settings(),
-        lambda i, batch: {
-            "facts": [
-                item(1, subject="two-factor authentication", predicate="second_factor",
-                     object="a one-time password")
-            ]
-        },
-    )
-
-    fact = extract_session(turns, llm=llm)[0]
-
-    assert fact.predicate != "asserts"
-    assert (fact.subject, fact.object) == ("two-factor authentication", "a one-time password")
-    assert turns[1].tier is Tier.ASSISTANT
-    assert int(Tier.ASSISTANT) < int(Tier.OWNER)
-
-
-def test_a_claim_that_already_names_the_assistant_is_not_re_voiced():
-    said = "The assistant recommended the Big Barker bed for a large dog."
-    turns = [turn(0, "Which bed?"), turn(1, said, role="assistant")]
-    llm = FakeLLM(make_settings(), lambda i, batch: {"facts": [item(1, text=said)]})
-
-    fact = extract_session(turns, llm=llm)[0]
-
-    assert fact.text == said
-    assert fact.text.lower().count("assistant") == 1
-
-
-def test_the_principal_keeps_their_own_voice():
-    """Only the assistant's half is re-voiced; the person's claims are theirs."""
-    turns = [turn(0, "I use an OTP app for work."), turn(1, "Noted.", role="assistant")]
-    llm = FakeLLM(
-        make_settings(),
-        lambda i, batch: {"facts": [item(0, text="The user uses an OTP app for work.")]},
-    )
-
-    fact = extract_session(turns, llm=llm)[0]
-
-    assert fact.text == "The user uses an OTP app for work."
-    assert "assistant" not in fact.text.lower()
-
-
-def test_the_worked_example_still_takes_nothing_from_a_disclaimer():
-    """The defect the two-voices rule was written for, pinned where it was fixed.
-
-    "I didn't know you had a dog named Lola" must never produce
-    `lola | pet_species | dog`: the species is the assistant's invention, and an
-    invented attribute is a false memory whatever tier it is filed at. Recording
-    what the assistant *supplied* must not reopen that.
-    """
-    examples = prompts.EXTRACT_EXAMPLES
-
-    assert "I didn't know you had a dog named Lola" in examples
-    assert "Nothing about Lola" in examples
-    assert '"subject": "lola"' not in examples
-    assert "pet_species" not in examples
-    # the fact the example does take from that turn is the assistant's own
-    assert '"text": "The assistant recommended the Big Barker' in examples
-    assert '"subject": "big barker"' in examples
 
 
 def test_an_owner_turn_is_not_rewritten_to_asserts():

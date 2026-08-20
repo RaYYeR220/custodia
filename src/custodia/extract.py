@@ -21,18 +21,6 @@ the schema does not know survives as free-form, where it is merely unqueryable
 rather than wrong, because unknown predicates are multi-valued and a wrong slot
 would make memory retire a fact that is still true.
 
-*Two voices, one record.* A conversation has two parties and memory keeps both.
-What the assistant said - a name it coined, a figure it quoted, the reason behind
-a recommendation - is recorded, because "which two methods did you mention?" is a
-question about the record and unanswerable if only one side of it was kept. What
-keeps that honest is the tier, not omission: an assistant fact enters at
-``Tier.ASSISTANT``, below the principal, so it is recallable but can never
-supersede something the person said. The claim is re-voiced as the assistant's on
-the way in, so a warrant shows who said it; what the assistant may never do is
-become a source of attributes about the person, which is the prompt's job to
-enforce and the reason a disclaimer like "I didn't know you had a dog named Lola"
-still yields nothing.
-
 *The model is never the last word.* Anything it returns is filtered against the
 schema (unknown keys dropped, turn index range-checked, timestamps re-derived from
 the turn when unstated) because the reply is generated from captured content, and
@@ -53,14 +41,7 @@ from typing import Any, Iterable, Sequence
 
 from custodia import config, prompts
 from custodia.llm import LLM
-from custodia.schema import (
-    ASSISTANT_ROLES,
-    OPEN_INTERVAL,
-    OWNER_ROLES,
-    PREDICATES,
-    Tier,
-    Turn,
-)
+from custodia.schema import OPEN_INTERVAL, OWNER_ROLES, PREDICATES, Tier, Turn
 
 log = logging.getLogger("custodia.extract")
 
@@ -75,11 +56,6 @@ LLM_CONF = 0.7
 
 MAX_ENTITIES = 12
 MAX_RULE_FACTS = 6
-
-#: how far into a claim the speaker may be named before the text is re-voiced;
-#: past the opening clause it reads as a mention rather than an attribution
-VOICE_WINDOW = 60
-_NAMES_ASSISTANT = re.compile(r"\bassistant\b", re.I)
 
 #: Spellings that mean a slot the schema already names. Kept short on purpose:
 #: the generic rules below (snake-casing, dropping a leading ``has_``/``is_``)
@@ -318,27 +294,8 @@ def _untrusted(turn: Turn) -> bool:
     return bool(turn.origin) or int(turn.tier) <= int(Tier.TOOL)
 
 
-def _assistant_voice(turn: Turn) -> bool:
-    """Whether the turn is the agent's own words rather than the principal's."""
-    return not _untrusted(turn) and (turn.role or "").strip().lower() in ASSISTANT_ROLES
-
-
 def _source_key(turn: Turn) -> str:
     return _norm(turn.origin) or _norm(turn.role) or "external source"
-
-
-def _in_assistant_voice(text: str) -> str:
-    """Name the speaker inside the claim, when the model did not.
-
-    The tier already records who said it, but a warrant is read as text: an
-    answer resting on "companies use OTP or biometrics" has to be able to say
-    who said so, and "you mentioned two methods - which?" is a question that
-    matches on the speaker. So the voice travels in the sentence too. It is
-    still the tier that does the guarding - a sentence cannot rank itself.
-    """
-    if _NAMES_ASSISTANT.search(text[:VOICE_WINDOW]):
-        return text
-    return f"The assistant said: {text}"
 
 
 def _parse(reply: dict[str, Any], win: _Window, principal: str) -> list[ExtractedFact]:
@@ -396,14 +353,6 @@ def _fact_from(
         obj = _norm(text)
         if subject not in text.lower():
             text = f"{subject} asserts: {text}"
-    elif _assistant_voice(turn):
-        # What the assistant told the person is part of the shared record - the
-        # name it supplied, the chapter it cited, the reason it gave - and a
-        # question about that record ("which two did you mention?") is only
-        # answerable if it was written down. It is written down as the
-        # assistant's: the tier ranks below the principal, so it can be recalled
-        # but can never supersede what they said themselves.
-        text = _in_assistant_voice(text)
 
     return ExtractedFact(
         text=text,
