@@ -73,7 +73,7 @@ export function AttackConsole({ corpus }: { corpus?: string }) {
   const control = preset.id === "legitimate-update";
   // the citation set is the honest signal: a reworded answer built from the same
   // facts is the same answer, and a differently-cited one is not
-  const held = result && !result.citations_changed;
+  const held = result && !result.took_effect;
 
   return (
     <div className="max-w-[1400px] mx-auto px-6 md:px-10 py-8 grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)] gap-10">
@@ -158,7 +158,7 @@ export function AttackConsole({ corpus }: { corpus?: string }) {
             <div
               className={`card p-4 border ${
                 control
-                  ? result.citations_changed
+                  ? result.took_effect
                     ? "border-verdigris/60"
                     : "border-vermilion/60"
                   : held
@@ -169,7 +169,7 @@ export function AttackConsole({ corpus }: { corpus?: string }) {
               <div className="flex flex-wrap items-center gap-3">
                 <span className="display text-[1.4rem] text-bone">
                   {control
-                    ? result.citations_changed
+                    ? result.took_effect
                       ? "Accepted"
                       : "Wrongly refused"
                     : held

@@ -377,7 +377,7 @@ def attack(
     # The citation set is the signal, not the wording: a model that rewrites
     # "Yes, X" as "X" changed the string and nothing else, while one that starts
     # citing the injected fact changed the answer however similar it reads.
-    changed = set(before.citations) != set(after.citations)
+    changed = after.answered and set(before.citations) != set(after.citations)
     reworded = (before.answer or "").strip() != (after.answer or "").strip()
     if reworded and not changed:
         console.print("[dim]wording differs, citations identical - same answer, same evidence[/]")

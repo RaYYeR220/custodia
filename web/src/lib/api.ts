@@ -120,6 +120,8 @@ export interface AttackResult {
   after: Verdict;
   answer_changed: boolean;
   citations_changed: boolean;
+  /** the write moved the answer *and* the answer is still an answer */
+  took_effect: boolean;
   citations_added: number[];
   quarantined: number;
   rejections: number;

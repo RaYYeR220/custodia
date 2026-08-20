@@ -415,6 +415,11 @@ def attack(req: AttackRequest) -> dict[str, Any]:
     # the verdict is taken from the citations, because those are the part the
     # product can actually prove.
     cited_before, cited_after = set(before.citations), set(after.citations)
+    # A refusal is never an acceptance. The citation set changing from something
+    # to nothing means the write pushed the answer off a cliff, not that it was
+    # taken on board, so the two conditions are reported separately and the
+    # client is expected to require both.
+    took_effect = after.answered and cited_before != cited_after
     return {
         "corpus": name,
         "injected": {"text": req.text, "tier": tier.label, "origin": req.origin, "session": sid},
@@ -423,6 +428,7 @@ def attack(req: AttackRequest) -> dict[str, Any]:
         "after": after.as_dict(),
         "answer_changed": before.answer.strip() != after.answer.strip(),
         "citations_changed": cited_before != cited_after,
+        "took_effect": took_effect,
         "citations_added": sorted(cited_after - cited_before),
         "quarantined": report.quarantined,
         "rejections": report.rejections,
