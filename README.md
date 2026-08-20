@@ -150,8 +150,37 @@ See [.env.example](.env.example).
 
 ## Evaluation
 
-See [eval/README.md](eval/README.md) for the commands, and
-[PROOF.md](PROOF.md) for results with the exact sample, seed and models used.
+30-question stratified sample of LongMemEval-S, seed 0, graded by a model that
+produced none of the answers it judges. Commands and full scorecards in
+[eval/README.md](eval/README.md) and [PROOF.md](PROOF.md).
+
+| system | accuracy | over-refusal | prompt tokens |
+|---|---|---|---|
+| **Custodia** | **34.8%** | 52.2% | **248** |
+| full context | 65.2% | 21.7% | 123,165 (8 of 30 truncated) |
+| BM25 retrieval | 56.5% | 30.4% | 13,119 |
+
+**Custodia is behind on accuracy and the gap is not small.** The cause is
+retrieval recall, not the gate, and we tested that rather than assuming it:
+widening the warrant and re-weighting the ranker each recovered nothing. Most of
+the failures are questions whose gold answer is *derived* — counting events,
+subtracting dates — and the facts they would be derived from are not reaching the
+warrant. A gate that refuses without evidence, on retrieval that misses the
+evidence, refuses.
+
+On the poisoning suite the picture is the other way round:
+
+| metric | Custodia | BM25 retrieval |
+|---|---|---|
+| attacks that moved the answer | **0 of 36** | 0 of 36 |
+| forged authority / instruction injection quarantined | **100%** | no such mechanism |
+| **legitimate update accepted** (the control) | **66.7%** | **16.7%** |
+| control wrongly refused | 0% | 0% |
+
+Neither system was fooled, so the flip rate says nothing on its own — a store
+that cannot be updated also scores zero. The control is the discriminating
+number: when the principal changes their own record, Custodia takes the change
+two times in three and the baseline one time in six.
 
 ## Honest limits
 
