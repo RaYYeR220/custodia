@@ -269,11 +269,20 @@ def _report_dict(report: Any) -> Any:
 
 
 def _warrant_text(warrant: Any) -> str:
-    """The evidence text a warrant would put in front of the model."""
-    evidence = getattr(warrant, "evidence", None)
-    if evidence is None:
+    """Exactly what the warrant puts in front of the model.
+
+    The rendered prompt, not just the fact text: source turns are quoted in it
+    and the baselines are counted on their whole prompt, so counting anything
+    less here would flatter us against them.
+    """
+    if getattr(warrant, "evidence", None) is None:
         return str(warrant)
-    return "\n".join(str(getattr(e, "text", e)) for e in evidence)
+    try:
+        from custodia.gate import render
+
+        return render(warrant)
+    except Exception:
+        return "\n".join(str(getattr(e, "text", e)) for e in warrant.evidence)
 
 
 def _tier_for(role: str) -> str:

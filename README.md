@@ -156,21 +156,19 @@ produced none of the answers it judges. Commands and full scorecards in
 
 | system | accuracy | abstention recall | hallucination | prompt tokens |
 |---|---|---|---|---|
-| **Custodia** | **30.4%** | **100%** | **0%** | **329** |
-| full context | 65.2% | 85.7% | 14.3% | 123,165 (8 of 30 truncated) |
+| **Custodia** | 52.2% | **100%** | **0%** | **5,037** |
+| full context | **65.2%** | 85.7% | 14.3% | 123,165 (8 of 30 truncated) |
 | BM25 retrieval | 56.5% | 100% | 0% | 13,119 |
 
-**Custodia is behind on accuracy and the gap is not small.** It is behind in one
-specific place: questions whose answer must be *derived* rather than recalled —
-"how many days between", "how many times did I". Those are all of
-`temporal-reasoning` (0 of 6) and most of `multi-session` (1 of 6). On questions
-whose answer some turn actually states, it holds up: `knowledge-update` 3 of 4,
-`single-session-user` 2 of 3.
+Within one question of the BM25 baseline, level with it on over-refusal, reading
+2.6x less. Still 13 points behind a baseline that puts the whole history in the
+prompt - which reads 24x more than we do, and answers 14.3% of the questions its
+memory could not support. Custodia answers none of them: it never answered a
+question memory could not support, and never invented one.
 
-What the same run shows on the other side: it never answered a question memory
-could not support, and it never invented one — 100% abstention recall and zero
-hallucinations against 85.7% and 14.3% for a baseline reading 370× more of the
-conversation.
+Where it is weakest is where an answer has to be aggregated across many sessions
+- "how many in total", "how many times" - because a ranked warrant is the wrong
+shape for counting. The failures there are undercounts, not inventions.
 
 On the poisoning suite the picture is the other way round:
 

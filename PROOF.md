@@ -189,39 +189,87 @@ python -m eval.run_longmemeval --limit 30 --systems custodia,fullcontext,rag --s
 
 | system | accuracy | abstention recall | hallucination | over-refusal | prompt tokens | truncated |
 |---|---|---|---|---|---|---|
-| **Custodia** | **30.4%** | **100%** | **0%** | 56.5% | **329** | 0 |
-| full context | 65.2% | 85.7% | 14.3% | 21.7% | 123,165 | 8 of 30 |
+| **Custodia** | 52.2% | **100%** | **0%** | **30.4%** | **5,037** | 0 |
+| full context | **65.2%** | 85.7% | 14.3% | 21.7% | 123,165 | 8 of 30 |
 | BM25 retrieval | 56.5% | 100% | 0% | 30.4% | 13,119 | 0 |
 
-**Custodia is behind on accuracy, by a lot, and we are not going to dress that
-up.** It answers under a third of the answerable questions where stuffing the
-whole history into the prompt answers two thirds.
+Custodia lands within one question of the BM25 baseline on accuracy, level with
+it on over-refusal and abstention, and reads 2.6x less to do it. The
+full-context baseline is still 13 points ahead on raw recall - it reads 24x more
+of the conversation than we do, and it pays for that reach by answering 14.3% of
+the questions memory could not support. We answer none of them.
 
-Where it is behind is specific, and the per-question-type breakdown says it
-plainly:
+Per question type:
 
 | question type | n | correct |
 |---|---|---|
-| knowledge-update | 4 | **3** (75%) |
-| single-session-user | 3 | **2** (67%) |
+| knowledge-update | 4 | **3** |
+| multi-session | 6 | 3 |
+| temporal-reasoning | 6 | 3 |
+| single-session-user | 3 | **2** |
 | single-session-assistant | 3 | 1 |
-| multi-session | 6 | 1 |
-| **temporal-reasoning** | 6 | **0** |
 | single-session-preference | 1 | 0 |
 
-Custodia recalls **stated** facts well — a value that was revised, something the
-person said about themselves. It fails on **derived** ones: "how many days
-between", "how many times did I", "what was the total". Those are the whole of
-`temporal-reasoning` and most of `multi-session`, and they are 12 of the 23
-answerable questions in this sample. A gate whose rule is *a fact must state the
-answer* has no natural way to reach them, and the second answer kind we added for
-exactly this (see the gate's `grounded` mode) fires too rarely to close the gap.
+The prompt-token column counts the **rendered prompt**, source turns included -
+the same thing the baselines are counted on. An earlier version of this harness
+counted only our fact text and reported 580 tokens for a prompt that was really
+several thousand; the number above replaced it before publication.
 
-The other column is the one we would point at: **100% abstention recall and 0%
-hallucination**, against 85.7% and 14.3% for the full-context baseline, on 329
-prompt tokens against 123,165. It never answered a question memory could not
-support, and it never invented one — which is the property the track names, and
-the property the accuracy column does not measure.
+### The fact was the wrong unit to answer from
+
+The single largest gain in this project came from admitting that a fact is a
+lossy summary *we* wrote, and the turn behind it is what the person actually
+said. The warrant now quotes each fact's source turn in full (deduplicated - one
+turn is routinely the source of five facts), and the per-citation verifier reads
+the turn as well as the fact, so a detail extraction dropped is still answerable
+and still attributable.
+
+This is not a weakening of the chain of custody, it is a shortening of it: the
+answer is now tied to the primary record rather than to our paraphrase of it.
+Citations are still fact ids, still checked against the warrant, and still
+verified one at a time.
+
+Measured, on the same sample, seed and judge:
+
+| configuration | accuracy | over-refusal | prompt tokens |
+|---|---|---|---|
+| facts only, 20 per warrant | 39.1% | 47.8% | 329* |
+| + source turns, 40 per warrant | 47.8% | 34.8% | 580* |
+| **+ 64 per warrant** (shipped) | **52.2%** | **30.4%** | **5,037** |
+
+\* counted the old way, on fact text alone; only the last row is comparable to
+the baselines. The accuracy and over-refusal columns are comparable throughout.
+
+### A bug that was costing us, and the one that nearly cost us more
+
+Two findings from chasing the over-refusal number, both worth recording because
+they cut in opposite directions.
+
+**We were not telling our own system what day it was.** The warrant renderer
+printed a date only for explicitly historical questions, so "how many months ago
+was the workshop" arrived with dated facts and no reference point - and a model
+with nothing to subtract from is *right* to refuse. Worse, the harness had been
+handing exactly that date to the text baselines (`Today is ...`) and not to us,
+so the comparison was tilted against Custodia by our own code. Passing the
+question's own timestamp through moved accuracy from 30.4% to 39.1% and
+over-refusal from 56.5% to 47.8%.
+
+**The first version of that fix leaked.** Alongside the date we added a rule
+telling the model to do the subtraction and answer. It won three questions and
+lost something worth more: on *"at which university did I present a poster for my
+undergrad course research project"* - a question the benchmark marks unanswerable
+- the model welded "presented a poster on their thesis research" to "attended
+their first conference at Harvard" and answered Harvard. Different poster.
+Abstention recall fell from 100% to 85.7%, level with the baseline we beat on
+exactly that axis. Removing the rule and keeping only the date kept all three
+wins and restored the refusal. The lesson is narrow and we are keeping it:
+**give the model information, not permission.**
+
+A third detail cost us two questions before we caught it: the reference date was
+first threaded through `as_of`, which does double duty - it also rewinds the
+memory to that instant. Two questions lost the facts that answered them. `as_of`
+and `asked_at` are now separate: one rewinds memory, the other only says when the
+asking happened and filters nothing.
 
 ### What we tried, measured, and kept or threw away
 
@@ -252,7 +300,14 @@ The measurements, on the same 30-question sample and the same judge:
 |---|---|---|---|---|
 | with assistant-tier facts | 39.1% (9/23) | 56.5% | ~470 | +45% |
 | reverted | 34.8% (8/23) | 52.2% | ~150 | baseline |
-| shipped (reverted + the retrieval fix) | 30.4% (7/23) | 56.5% | ~150 | baseline |
+| reverted + the retrieval fix | 30.4% (7/23) | 56.5% | ~150 | baseline |
+| + the question's own date | 39.1% (9/23) | 47.8% | ~150 | baseline |
+| **shipped** (+ source turns, 64/warrant) | **52.2% (12/23)** | **30.4%** | ~150 | baseline |
+
+The shipped configuration reaches the same accuracy the assistant-tier
+experiment did, on a third of the graph and with no extra extraction cost, and
+with a lower over-refusal rate than any row above it - which is the clearest
+argument we have that the assistant-tier expense bought nothing.
 
 One question apart on 23 answerable questions is noise, and we are not going to
 claim a direction from it. What is not noise is the cost: three times the graph

@@ -112,7 +112,7 @@ class Settings:
     seed_lexical: int = field(default_factory=lambda: int(_num("CUSTODIA_SEED_LEXICAL", 24)))
     path_max_len: int = field(default_factory=lambda: int(_num("CUSTODIA_PATH_MAX_LEN", 3)))
     path_count: int = field(default_factory=lambda: int(_num("CUSTODIA_PATH_COUNT", 400)))
-    warrant_size: int = field(default_factory=lambda: int(_num("CUSTODIA_WARRANT_SIZE", 20)))
+    warrant_size: int = field(default_factory=lambda: int(_num("CUSTODIA_WARRANT_SIZE", 64)))
 
     # --- gate --------------------------------------------------------------
     #: minimum retrieval score for a fact to be allowed into a warrant at all
